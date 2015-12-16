@@ -1041,12 +1041,11 @@ static void hub_activate(struct usb_hub *hub, enum hub_activation_type type)
 	unsigned delay;
 
 	/* Continue a partial initialization */
-#ifdef CONFIG_PANTECH_SIO_BUG_FIX //Android security CVE-2015-8816
 	if (type == HUB_INIT2 || type == HUB_INIT3) {
 		device_lock(hub->intfdev);
 
 		/* Was the hub disconnected while we were waiting? */
-		if(hub->disconnected) {
+		if (hub->disconnected) {
 			device_unlock(hub->intfdev);
 			kref_put(&hub->kref, hub_release);
 			return;
@@ -1056,12 +1055,7 @@ static void hub_activate(struct usb_hub *hub, enum hub_activation_type type)
 		goto init3;
 	}
 	kref_get(&hub->kref);
-#else
-	if (type == HUB_INIT2)
-		goto init2;
-	if (type == HUB_INIT3)
-		goto init3;
-#endif
+
 	/* The superspeed hub except for root hub has to use Hub Depth
 	 * value as an offset into the route string to locate the bits
 	 * it uses to determine the downstream port number. So hub driver
@@ -1258,9 +1252,7 @@ static void hub_activate(struct usb_hub *hub, enum hub_activation_type type)
 			queue_delayed_work(system_power_efficient_wq,
 					&hub->init_work,
 					msecs_to_jiffies(delay));
-#ifdef CONFIG_PANTECH_SIO_BUG_FIX //Android security CVE-2015-8816
 			device_unlock(hub->intfdev);
-#endif
 			return;		/* Continues at init3: below */
 		} else {
 			msleep(delay);
@@ -1283,12 +1275,11 @@ static void hub_activate(struct usb_hub *hub, enum hub_activation_type type)
 	if (type <= HUB_INIT3)
 		usb_autopm_put_interface_async(to_usb_interface(hub->intfdev));
 
-#ifdef CONFIG_PANTECH_SIO_BUG_FIX //Android security CVE-2015-8816
+
 	if (type == HUB_INIT2 || type == HUB_INIT3)
 		device_unlock(hub->intfdev);
 
-	kref_put(&hub->kref, hub_release);
-#endif
+	kref_put(&hub->kref, hub_release
 }
 
 /* Implement the continuations for the delays above */
