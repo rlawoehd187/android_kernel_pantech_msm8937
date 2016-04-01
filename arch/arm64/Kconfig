@@ -1138,6 +1138,7 @@ source "lib/Kconfig"
 
 source "arch/arm64/mm/Kconfig"
 
+source "arch/arm64/fastcharge/Kconfig"
 
 #ifdef FEATURE_SKY_DS_KERNEL_CONFIG
 menu "SKY Data Kernel Configuration"
