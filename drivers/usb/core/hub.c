@@ -1279,7 +1279,7 @@ static void hub_activate(struct usb_hub *hub, enum hub_activation_type type)
 	if (type == HUB_INIT2 || type == HUB_INIT3)
 		device_unlock(hub->intfdev);
 
-	kref_put(&hub->kref, hub_release
+	kref_put(&hub->kref, hub_release);
 }
 
 /* Implement the continuations for the delays above */
