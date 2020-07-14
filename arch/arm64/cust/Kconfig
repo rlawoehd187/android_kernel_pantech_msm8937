@@ -1,0 +1,2 @@
+source "arch/arm64/cust/LCD/Kconfig"
+source "arch/arm64/cust/PMIC/Kconfig"

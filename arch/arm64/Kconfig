@@ -1083,6 +1083,8 @@ config ARM64_ERRATUM_843419
 
 endmenu
 
+source "arch/arm64/cust/Kconfig"
+
 source "net/Kconfig"
 
 source "drivers/Kconfig"

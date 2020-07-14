@@ -1,4 +1,4 @@
-/* Copyright (c) 2013-2018, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -33,6 +33,10 @@
 #include <soc/qcom/restart.h>
 #include <soc/qcom/watchdog.h>
 
+#ifdef CONFIG_PANTECH_ERR_CRASH_LOGGING
+#include <mach/pantech_sys.h>
+#endif
+
 #define EMERGENCY_DLOAD_MAGIC1    0x322A4F99
 #define EMERGENCY_DLOAD_MAGIC2    0xC67E4350
 #define EMERGENCY_DLOAD_MAGIC3    0x77777777
@@ -47,7 +51,7 @@
 
 
 static int restart_mode;
-static void *restart_reason;
+static void *restart_reason, *dload_type_addr;
 static bool scm_pmic_arbiter_disable_supported;
 static bool scm_deassert_ps_hold_supported;
 /* Download mode master kill-switch */
@@ -55,15 +59,12 @@ static void __iomem *msm_ps_hold;
 static phys_addr_t tcsr_boot_misc_detect;
 static void scm_disable_sdi(void);
 
-#ifdef CONFIG_MSM_DLOAD_MODE
 /* Runtime could be only changed value once.
-* There is no API from TZ to re-enable the registers.
-* So the SDI cannot be re-enabled when it already by-passed.
+ * There is no API from TZ to re-enable the registers.
+ * So the SDI cannot be re-enabled when it already by-passed.
 */
 static int download_mode = 1;
-#else
-static const int download_mode;
-#endif
+static struct kobject dload_kobj;
 
 #ifdef CONFIG_MSM_DLOAD_MODE
 #define EDL_MODE_PROP "qcom,msm-imem-emergency_download_mode"
@@ -74,8 +75,6 @@ static void *dload_mode_addr;
 static bool dload_mode_enabled;
 static void *emergency_dload_mode_addr;
 static bool scm_dload_supported;
-static struct kobject dload_kobj;
-static void *dload_type_addr;
 
 static int dload_set(const char *val, struct kernel_param *kp);
 /* interface for exporting attributes */
@@ -144,6 +143,9 @@ static void set_dload_mode(int on)
 	if (ret)
 		pr_err("Failed to set secure DLOAD mode: %d\n", ret);
 
+	if (!on)
+		scm_disable_sdi();
+
 	dload_mode_enabled = on;
 }
 
@@ -200,7 +202,7 @@ static int dload_set(const char *val, struct kernel_param *kp)
 #else
 static void set_dload_mode(int on)
 {
-	return;
+	scm_disable_sdi();
 }
 
 static void enable_emergency_dload_mode(void)
@@ -287,8 +289,7 @@ static void msm_restart_prepare(const char *cmd)
 			need_warm_reset = true;
 	} else {
 		need_warm_reset = (get_dload_mode() ||
-				((cmd != NULL && cmd[0] != '\0') &&
-				strcmp(cmd, "userrequested")));
+				(cmd != NULL && cmd[0] != '\0'));
 	}
 
 	/* Hard reset the PMIC unless memory contents must be maintained. */
@@ -332,6 +333,24 @@ static void msm_restart_prepare(const char *cmd)
 					     restart_reason);
 		} else if (!strncmp(cmd, "edl", 3)) {
 			enable_emergency_dload_mode();
+#ifdef CONFIG_PANTECH_FS_AUTO_REPAIR 
+		/* added for ext4 auto repair */
+		} else if (!strncmp(cmd, "autorepair-user", 15)){
+			pantech_sys_reset_reason_set(SYS_RESET_REASON_USERDATA_FS); 
+		} else if (!strncmp(cmd, "data_mount_err", 14)){
+			pantech_sys_reset_reason_set(SYS_RESET_REASON_DATA_MOUNT_ERR);
+		}
+ #ifdef CONFIG_PANTECH_DXHDCP_PROVISIONING //lsi@bs1 FEATURE_PANTECH_DXHDCP_PROVISIONING run e2fsck for secure parition (fs error)
+    else if (!strncmp(cmd, "autorepair-secure", 15))
+    {
+			pr_notice("reboot autorepair-secure\n");
+			pantech_sys_reset_reason_set(SYS_RESET_REASON_SECURE_FS); 
+			//panic("secure partition, adb reboot autorepair-secure -> forced panic \n");
+    } 
+ #endif
+
+#endif
+
 		} else {
 			__raw_writel(0x77665501, restart_reason);
 		}
@@ -386,7 +405,6 @@ static void do_msm_restart(enum reboot_mode reboot_mode, const char *cmd)
 		msm_trigger_wdog_bite();
 #endif
 
-	scm_disable_sdi();
 	halt_spmi_pmic_arbiter();
 	deassert_ps_hold();
 
@@ -398,7 +416,6 @@ static void do_msm_poweroff(void)
 	pr_notice("Powering off the SoC\n");
 
 	set_dload_mode(0);
-	scm_disable_sdi();
 	qpnp_pon_system_pwr_off(PON_POWER_OFF_SHUTDOWN);
 
 	halt_spmi_pmic_arbiter();
@@ -409,7 +426,6 @@ static void do_msm_poweroff(void)
 	return;
 }
 
-#ifdef CONFIG_MSM_DLOAD_MODE
 static ssize_t attr_show(struct kobject *kobj, struct attribute *attr,
 				char *buf)
 {
@@ -487,7 +503,6 @@ static struct attribute *reset_attrs[] = {
 static struct attribute_group reset_attr_group = {
 	.attrs = reset_attrs,
 };
-#endif
 
 static int msm_restart_probe(struct platform_device *pdev)
 {
@@ -523,7 +538,6 @@ static int msm_restart_probe(struct platform_device *pdev)
 				"qcom,msm-imem-dload-type");
 	if (!np) {
 		pr_err("unable to find DT imem dload-type node\n");
-		goto skip_sysfs_create;
 	} else {
 		dload_type_addr = of_iomap(np, 0);
 		if (!dload_type_addr) {
@@ -537,7 +551,6 @@ static int msm_restart_probe(struct platform_device *pdev)
 	if (ret) {
 		pr_err("%s:Error in creation kobject_add\n", __func__);
 		kobject_put(&dload_kobj);
-		goto skip_sysfs_create;
 	}
 
 	ret = sysfs_create_group(&dload_kobj, &reset_attr_group);
@@ -547,6 +560,11 @@ static int msm_restart_probe(struct platform_device *pdev)
 	}
 skip_sysfs_create:
 #endif
+
+#ifdef CONFIG_PANTECH_ERR_CRASH_LOGGING
+    //pantech_sys_imem_init();
+#endif
+
 	np = of_find_compatible_node(NULL, NULL,
 				"qcom,msm-imem-restart_reason");
 	if (!np) {
@@ -580,8 +598,6 @@ skip_sysfs_create:
 		scm_deassert_ps_hold_supported = true;
 
 	set_dload_mode(download_mode);
-	if (!download_mode)
-		scm_disable_sdi();
 
 	return 0;
 
