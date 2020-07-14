@@ -1,0 +1,25 @@
+# Pantech configuration options
+
+config MACH_PANTECH_MSM8937
+	bool "ef71s board"
+	help
+	  Support for IM-100
+
+config MACH_MSM8937_EF71S
+	bool "ef71s board"
+	select MACH_PANTECH_MSM8937
+	help
+	  Support for IM-100
+
+config MACH_MSM8937_EF71K
+	bool "ef71k board"
+	select MACH_PANTECH_MSM8937
+	help
+	  Support for IM-100
+
+config MACH_MSM8937_EF71IE
+	bool "ef71ie board"
+	select MACH_PANTECH_MSM8937
+	help
+	  Support for IM-100
+
