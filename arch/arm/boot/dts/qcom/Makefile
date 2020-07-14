@@ -156,7 +156,12 @@ dtb-$(CONFIG_ARCH_MDMCALIFORNIUM) += mdmcalifornium-sim.dtb \
 	mdmcalifornium-v1.1-nand-mtp.dtb \
 	mdmcalifornium-v1.1-nand-dualwifi-mtp.dtb
 
-dtb-$(CONFIG_ARCH_MSM8937) += msm8937-rumi.dtb \
+ifeq ($(CONFIG_MACH_PANTECH_MSM8937),y)
+dtb-$(CONFIG_MACH_MSM8937_EF71K) += msm8937-ef71ie-tp20.dtb \
+	msm8937-ef71s-tp20.dtb \
+	msm8937-ef71k-tp20.dtb
+else
+dtb-$(CONFIG_ARCH_MSM8937) += msm8937-rumi.dtb 
 	msm8937-pmi8950-cdp.dtb \
 	msm8937-pmi8937-cdp.dtb \
 	msm8937-pmi8950-ext-codec-cdp.dtb \
@@ -172,6 +177,7 @@ dtb-$(CONFIG_ARCH_MSM8937) += msm8937-rumi.dtb \
 	apq8037-pmi8937-cdp.dtb \
 	apq8037-pmi8950-mtp.dtb \
 	apq8037-pmi8937-mtp.dtb
+endif
 
 dtb-$(CONFIG_ARCH_MSM8917) += msm8917-rumi.dtb \
 	apq8017-pmi8937-cdp.dtb \
