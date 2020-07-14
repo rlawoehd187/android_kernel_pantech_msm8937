@@ -177,6 +177,18 @@ enum {
 	SMEM_NUM_ITEMS, /* 498 */
 };
 
+typedef struct
+{
+    uint32_t  power_on_reason;
+	uint32_t  factory_dummy_adc;
+	uint8_t   factory_dummy_present;
+	uint32_t  battery_id;	
+	uint32_t  battery_id_adc;		
+	uint32_t  power_on_mode;
+	uint32_t  silent_boot_mode;		
+	uint32_t  backlight_off;		
+} oem_pm_smem_vendor1_data_type;
+
 #ifdef CONFIG_MSM_SMEM
 void *smem_alloc(unsigned id, unsigned size_in, unsigned to_proc,
 								unsigned flags);
