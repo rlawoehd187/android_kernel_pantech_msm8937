@@ -62,6 +62,7 @@
 	voice: qcom,msm-pcm-voice {
 		compatible = "qcom,msm-pcm-voice";
 		qcom,destroy-cvd;
+		qcom,vote-bms;
 	};
 
 	stub_codec: qcom,msm-stub-codec {
@@ -251,11 +252,6 @@
 			compatible = "qcom,msm-dai-q6-dev";
 			qcom,msm-dai-q6-dev-id = <32770>;
 		};
-
-		sb_6_rx: qcom,msm-dai-q6-sb-6-rx {
-			compatible = "qcom,msm-dai-q6-dev";
-			qcom,msm-dai-q6-dev-id = <16396>;
-		};
 	};
 
 	hostless: qcom,msm-pcm-hostless {
@@ -436,16 +432,16 @@
 			"AIF4 VI", "MCLK",
 			"AIF4 VI", "MICBIAS_REGULATOR",
 			"RX_BIAS", "MCLK",
-			"MADINPUT", "MCLK",
-			"AIF4 MAD", "MICBIAS_REGULATOR",
+			"AMIC3", "MIC BIAS1", //FEATURE_PANTECH_SND
+			"MIC BIAS1", "Handset Mic", //FEATURE_PANTECH_SND
 			"AMIC2", "MIC BIAS2",
 			"MIC BIAS2", "Headset Mic",
-			"AMIC3", "MIC BIAS2",
-			"MIC BIAS2", "ANCRight Headset Mic",
-			"AMIC4", "MIC BIAS2",
-			"MIC BIAS2", "ANCLeft Headset Mic",
-			"AMIC5", "MIC BIAS3",
-			"MIC BIAS3", "Handset Mic",
+//			"AMIC3", "MIC BIAS2", //FEATURE_PANTECH_SND
+//			"MIC BIAS2", "ANCRight Headset Mic", //FEATURE_PANTECH_SND
+//			"AMIC4", "MIC BIAS2", //FEATURE_PANTECH_SND
+//			"MIC BIAS2", "ANCLeft Headset Mic", //FEATURE_PANTECH_SND
+			"AMIC4", "MIC BIAS3", //FEATURE_PANTECH_SND
+			"MIC BIAS3", "Handset Mic", //FEATURE_PANTECH_SND
 			"AMIC6", "MIC BIAS4",
 			"MIC BIAS4", "Analog Mic6",
 			"DMIC0", "MIC BIAS1",
@@ -491,8 +487,12 @@
 		pinctrl-3 = <&pri_tlmm_lines_act &pri_tlmm_ws_act
 						&cross_conn_det_act>;
 
-		qcom,msm-mbhc-hphl-swh = <0>;
-		qcom,msm-mbhc-gnd-swh = <0>;
+		qcom,msm-mbhc-hphl-swh = <1>; //FEATURE_PANTECH_SND [20160106 SND hdj] NO-type
+		qcom,msm-mbhc-gnd-swh = <1>; //FEATURE_PANTECH_SND [20160106 SND hdj] NO-type
+		qcom,msm-hs-micbias-type = "external"; //FEATURE_PANTECH_SND [20160106 SND hdj] Headset MIC Bias Ext
+		qcom,cdc-micbias1-ext-cap; //FEATURE_PANTECH_SND [20160106 SND hdj] adding external cap
+		qcom,cdc-micbias2-ext-cap; //FEATURE_PANTECH_SND [20160106 SND hdj] adding external cap
+		qcom,cdc-micbias3-ext-cap; //FEATURE_PANTECH_SND [20160106 SND hdj] adding external cap
 		qcom,tasha-mclk-clk-freq = <9600000>;
 		asoc-platform = <&pcm0>, <&pcm1>, <&pcm2>, <&voip>, <&voice>,
 				<&loopback>, <&compress>, <&hostless>,
@@ -514,8 +514,7 @@
 				<&incall_record_rx>, <&incall_record_tx>,
 				<&incall_music_rx>, <&incall_music_2_rx>,
 				<&sb_5_rx>,  <&bt_sco_rx>,
-				<&bt_sco_tx>, <&int_fm_rx>, <&int_fm_tx>,
-				<&sb_6_rx>;
+				<&bt_sco_tx>, <&int_fm_rx>, <&int_fm_tx>;
 		asoc-cpu-names = "msm-dai-q6-auxpcm.1",
 				"msm-dai-q6-mi2s.2",
 				"msm-dai-q6-mi2s.3", "msm-dai-q6-mi2s.5",
@@ -530,8 +529,7 @@
 				"msm-dai-q6-dev.32772", "msm-dai-q6-dev.32773",
 				"msm-dai-q6-dev.32770", "msm-dai-q6-dev.16394",
 				"msm-dai-q6-dev.12288", "msm-dai-q6-dev.12289",
-				"msm-dai-q6-dev.12292", "msm-dai-q6-dev.12293",
-				"msm-dai-q6-dev.16396";
+				"msm-dai-q6-dev.12292", "msm-dai-q6-dev.12293";
 		asoc-codec = <&stub_codec>, <&hdmi_dba>;
 		asoc-codec-names = "msm-stub-codec.1", "msm-hdmi-dba-codec-rx";
 	};
@@ -678,12 +676,12 @@
 			"cdc-vdd-px";
 
 		qcom,cdc-on-demand-supplies = "cdc-vdd-mic-bias";
-
+//FEATURE_PANTECH_SND MIC QC default 1.8v pantech 2.5v only headset bias
 		qcom,cdc-micbias1-mv = <1800>;
-		qcom,cdc-micbias2-mv = <1800>;
+		qcom,cdc-micbias2-mv = <2500>;
 		qcom,cdc-micbias3-mv = <1800>;
 		qcom,cdc-micbias4-mv = <1800>;
-
+//FEATURE_PANTECH_SND
 		qcom,cdc-mclk-clk-rate = <9600000>;
 		qcom,cdc-slim-ifd = "tasha-slim-ifd";
 		qcom,cdc-slim-ifd-elemental-addr = [00 00 A0 01 17 02];
