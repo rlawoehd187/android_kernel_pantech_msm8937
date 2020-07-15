@@ -19,6 +19,7 @@
 #include <linux/irqreturn.h>
 #include <linux/pinctrl/consumer.h>
 #include <linux/gpio.h>
+#include <linux/mutex.h>
 
 #include "mdss_panel.h"
 #include "mdss_dsi_cmd.h"
@@ -432,6 +433,10 @@ struct mdss_dsi_ctrl_pdata {
 	int disp_en_gpio;
 	int bklt_en_gpio;
 	int mode_gpio;
+	struct mutex		bklt_dsc_mutex;
+	int bl_en_gpio;
+	int lcd_vddio_reg_en_gpio;
+	int lcd_vddio_switch_en_gpio;	
 	int bklt_ctrl;	/* backlight ctrl */
 	bool pwm_pmi;
 	int pwm_period;
@@ -470,6 +475,7 @@ struct mdss_dsi_ctrl_pdata {
 	struct dsi_panel_cmds status_cmds;
 	u32 *status_valid_params;
 	u32 *status_cmds_rlen;
+	struct dsi_panel_cmds cabc_cmds;
 	u32 *status_value;
 	unsigned char *return_buf;
 	u32 groups; /* several alternative values to compare */
@@ -640,6 +646,7 @@ bool __mdss_dsi_clk_enabled(struct mdss_dsi_ctrl_pdata *ctrl, u8 clk_type);
 void mdss_dsi_ctrl_setup(struct mdss_dsi_ctrl_pdata *ctrl);
 bool mdss_dsi_dln0_phy_err(struct mdss_dsi_ctrl_pdata *ctrl, bool print_en);
 void mdss_dsi_lp_cd_rx(struct mdss_dsi_ctrl_pdata *ctrl);
+void mdss_dsi_get_hw_revision(struct mdss_dsi_ctrl_pdata *ctrl);
 void mdss_dsi_read_phy_revision(struct mdss_dsi_ctrl_pdata *ctrl);
 int mdss_dsi_panel_cmd_read(struct mdss_dsi_ctrl_pdata *ctrl, char cmd0,
 		char cmd1, void (*fxn)(int), char *rbuf, int len);
