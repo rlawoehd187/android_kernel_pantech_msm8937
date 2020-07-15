@@ -44,7 +44,6 @@
 
 /* Model CFG File */
 
-#if MXT_CFG_WRITE_BIN
 #include "config/EF71/mxt_cfg_ef71.c"
 
 /* Pantech Dev File */

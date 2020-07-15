@@ -602,9 +602,6 @@ static int cluster_select(struct lpm_cluster *cluster, bool from_idle)
 		if (suspend_in_progress && from_idle && level->notify_rpm)
 			continue;
 
-		if (level->notify_rpm && msm_rpm_waiting_for_ack())
-			continue;
-
 		best_level = i;
 
 		if (from_idle && sleep_us <= pwr_params->max_residency)
@@ -650,26 +647,6 @@ static int cluster_configure(struct lpm_cluster *cluster, int idx,
 			goto failed_set_mode;
 	}
 
-	if (level->notify_rpm) {
-		struct cpumask nextcpu, *cpumask;
-		uint64_t us;
-
-		us = get_cluster_sleep_time(cluster, &nextcpu, from_idle);
-		cpumask = level->disable_dynamic_routing ? NULL : &nextcpu;
-
-		ret = msm_rpm_enter_sleep(0, cpumask);
-		if (ret) {
-			pr_info("Failed msm_rpm_enter_sleep() rc = %d\n", ret);
-			goto failed_set_mode;
-		}
-
-		us = us + 1;
-		do_div(us, USEC_PER_SEC/SCLK_HZ);
-		msm_mpm_enter_sleep(us, from_idle, cpumask);
-
-		if (cluster->no_saw_devices && !use_psci)
-			msm_spm_set_rpm_hs(true);
-	}
 
 	/* Notify cluster enter event after successfully config completion */
 	cluster_notify(cluster, level, true);
@@ -783,20 +760,6 @@ static void cluster_unprepare(struct lpm_cluster *cluster,
 	lpm_stats_cluster_exit(cluster->stats, cluster->last_level, true);
 
 	level = &cluster->levels[cluster->last_level];
-	if (level->notify_rpm) {
-		msm_rpm_exit_sleep();
-
-		/* If RPM bumps up CX to turbo, unvote CX turbo vote
-		 * during exit of rpm assisted power collapse to
-		 * reduce the power impact
-		 */
-
-		lpm_wa_cx_unvote_send();
-		msm_mpm_exit_sleep(from_idle);
-
-		if (cluster->no_saw_devices && !use_psci)
-			msm_spm_set_rpm_hs(false);
-	}
 
 	update_debug_pc_event(CLUSTER_EXIT, cluster->last_level,
 			cluster->num_children_in_sync.bits[0],
