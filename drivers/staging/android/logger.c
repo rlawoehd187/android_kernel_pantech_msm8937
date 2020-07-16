@@ -120,9 +120,10 @@ static inline struct logger_log *file_get_log(struct file *file)
 {
 	if (file->f_mode & FMODE_READ) {
 		struct logger_reader *reader = file->private_data;
+
 		return reader->log;
-	} else
-		return file->private_data;
+	}
+	return file->private_data;
 }
 
 /*
@@ -169,8 +170,7 @@ static size_t get_user_hdr_len(int ver)
 {
 	if (ver < 2)
 		return sizeof(struct user_logger_entry_compat);
-	else
-		return sizeof(struct logger_entry);
+	return sizeof(struct logger_entry);
 }
 
 static ssize_t copy_header_to_user(int ver, struct logger_entry *entry,
@@ -421,70 +421,18 @@ static void fix_up_readers(struct logger_log *log, size_t len)
 			reader->r_off = get_next_entry(log, reader->r_off, len);
 }
 
-/*
- * do_write_log - writes 'len' bytes from 'buf' to 'log'
- *
- * The caller needs to hold log->mutex.
- */
-static void do_write_log(struct logger_log *log, const void *buf, size_t count)
-{
-	size_t len;
-
-	len = min(count, log->size - log->w_off);
-	memcpy(log->buffer + log->w_off, buf, len);
-
-	if (count != len)
-		memcpy(log->buffer, buf + len, count - len);
-
-	log->w_off = logger_offset(log, log->w_off + count);
-
-}
-
-/*
- * do_write_log_user - writes 'len' bytes from the user-space buffer 'buf' to
- * the log 'log'
- *
- * The caller needs to hold log->mutex.
- *
- * Returns 'count' on success, negative error code on failure.
- */
-static ssize_t do_write_log_from_user(struct logger_log *log,
-				      const void __user *buf, size_t count)
-{
-	size_t len;
-
-	len = min(count, log->size - log->w_off);
-	if (len && copy_from_user(log->buffer + log->w_off, buf, len))
-		return -EFAULT;
-
-	if (count != len)
-		if (copy_from_user(log->buffer, buf + len, count - len))
-			/*
-			 * Note that by not updating w_off, this abandons the
-			 * portion of the new entry that *was* successfully
-			 * copied, just above.  This is intentional to avoid
-			 * message corruption from missing fragments.
-			 */
-			return -EFAULT;
-
-	log->w_off = logger_offset(log, log->w_off + count);
-
-	return count;
-}
-
-/*
- * logger_aio_write - our write method, implementing support for write(),
+ * logger_write_iter - our write method, implementing support for write(),
  * writev(), and aio_write(). Writes are our fast path, and we try to optimize
  * them above all else.
  */
-static ssize_t logger_aio_write(struct kiocb *iocb, const struct iovec *iov,
-			 unsigned long nr_segs, loff_t ppos)
+static ssize_t logger_write_iter(struct kiocb *iocb, struct iov_iter *from)
 {
 	struct logger_log *log = file_get_log(iocb->ki_filp);
-	size_t orig;
 	struct logger_entry header;
 	struct timespec now;
-	ssize_t ret = 0;
+	size_t len, count, w_off;
+
+	count = min_t(size_t, iocb->ki_nbytes, LOGGER_ENTRY_MAX_PAYLOAD);
 
 	now = current_kernel_time();
 
@@ -493,7 +441,7 @@ static ssize_t logger_aio_write(struct kiocb *iocb, const struct iovec *iov,
 	header.sec = now.tv_sec;
 	header.nsec = now.tv_nsec;
 	header.euid = current_euid();
-	header.len = min_t(size_t, iocb->ki_left, LOGGER_ENTRY_MAX_PAYLOAD);
+	header.len = count;
 	header.hdr_size = sizeof(struct logger_entry);
 
 	/* null writes succeed, return zero */
@@ -501,8 +449,6 @@ static ssize_t logger_aio_write(struct kiocb *iocb, const struct iovec *iov,
 		return 0;
 
 	mutex_lock(&log->mutex);
-
-	orig = log->w_off;
 
 	/*
 	 * Fix up any readers, pulling them forward to the first readable
@@ -512,33 +458,38 @@ static ssize_t logger_aio_write(struct kiocb *iocb, const struct iovec *iov,
 	 */
 	fix_up_readers(log, sizeof(struct logger_entry) + header.len);
 
-	do_write_log(log, &header, sizeof(struct logger_entry));
+	len = min(sizeof(header), log->size - log->w_off);
+	memcpy(log->buffer + log->w_off, &header, len);
+	memcpy(log->buffer, (char *)&header + len, sizeof(header) - len);
 
-	while (nr_segs-- > 0) {
-		size_t len;
-		ssize_t nr;
+	/* Work with a copy until we are ready to commit the whole entry */
+	w_off =  logger_offset(log, log->w_off + sizeof(struct logger_entry));
 
-		/* figure out how much of this vector we can keep */
-		len = min_t(size_t, iov->iov_len, header.len - ret);
+	len = min(count, log->size - w_off);
 
-		/* write out this segment's payload */
-		nr = do_write_log_from_user(log, iov->iov_base, len);
-		if (unlikely(nr < 0)) {
-			log->w_off = orig;
-			mutex_unlock(&log->mutex);
-			return nr;
-		}
-
-		iov++;
-		ret += nr;
+	if (copy_from_iter(log->buffer + w_off, len, from) != len) {
+		/*
+		 * Note that by not updating log->w_off, this abandons the
+		 * portion of the new entry that *was* successfully
+		 * copied, just above.  This is intentional to avoid
+		 * message corruption from missing fragments.
+		 */
+		mutex_unlock(&log->mutex);
+		return -EFAULT;
 	}
 
+	if (copy_from_iter(log->buffer, count - len, from) != count - len) {
+		mutex_unlock(&log->mutex);
+		return -EFAULT;
+	}
+
+	log->w_off = logger_offset(log, w_off + count);
 	mutex_unlock(&log->mutex);
 
 	/* wake up any blocked readers */
 	wake_up_interruptible(&log->wq);
 
-	return ret;
+	return len;
 }
 
 static struct logger_log *get_log_from_minor(int minor)
@@ -710,7 +661,7 @@ static long logger_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 			ret = -EBADF;
 			break;
 		}
-		if (!(in_egroup_p(file->f_dentry->d_inode->i_gid) ||
+		if (!(in_egroup_p(file_inode(file)->i_gid) ||
 				capable(CAP_SYSLOG))) {
 			ret = -EPERM;
 			break;
@@ -746,7 +697,7 @@ static long logger_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 static const struct file_operations logger_fops = {
 	.owner = THIS_MODULE,
 	.read = logger_read,
-	.aio_write = logger_aio_write,
+	.write_iter = logger_write_iter,
 	.poll = logger_poll,
 	.unlocked_ioctl = logger_ioctl,
 	.compat_ioctl = logger_ioctl,
@@ -797,12 +748,7 @@ static int __init create_log(char *log_name, int size)
 	struct logger_log *log;
 	unsigned char *buffer;
 
-#if 0//def CONFIG_PANTECH_ERR_CRASH_LOGGING
-	buffer = kzalloc(size+LOGCAT_HEADER_SIZE, GFP_KERNEL);
-#else
-	buffer = vmalloc(size+LOGCAT_HEADER_SIZE);
-#endif
-
+	buffer = vmalloc(size);
 	if (buffer == NULL)
 		return -ENOMEM;
 
@@ -838,7 +784,7 @@ static int __init create_log(char *log_name, int size)
 	if (unlikely(ret)) {
 		pr_err("failed to register misc device for log '%s'!\n",
 				log->misc.name);
-		goto out_free_log;
+		goto out_free_misc_name;
 	}
 
 #ifdef CONFIG_PANTECH_ERR_CRASH_LOGGING
@@ -855,15 +801,14 @@ static int __init create_log(char *log_name, int size)
 
 	return 0;
 
+out_free_misc_name:
+	kfree(log->misc.name);
+
 out_free_log:
 	kfree(log);
 
 out_free_buffer:
-#if 0 //def CONFIG_PANTECH_ERR_CRASH_LOGGING
-	kfree(buffer);
-#else
 	vfree(buffer);
-#endif
 	return ret;
 }
 
@@ -871,19 +816,19 @@ static int __init logger_init(void)
 {
 	int ret;
 
-	ret = create_log(LOGGER_LOG_MAIN, CONFIG_LOGCAT_SIZE*1024);
+	ret = create_log(LOGGER_LOG_MAIN, 256*1024);
 	if (unlikely(ret))
 		goto out;
 
-	ret = create_log(LOGGER_LOG_EVENTS, CONFIG_LOGCAT_SIZE*1024);
+	ret = create_log(LOGGER_LOG_EVENTS, 256*1024);
 	if (unlikely(ret))
 		goto out;
 
-	ret = create_log(LOGGER_LOG_RADIO, CONFIG_LOGCAT_SIZE*1024);
+	ret = create_log(LOGGER_LOG_RADIO, 256*1024);
 	if (unlikely(ret))
 		goto out;
 
-	ret = create_log(LOGGER_LOG_SYSTEM, CONFIG_LOGCAT_SIZE*1024);
+	ret = create_log(LOGGER_LOG_SYSTEM, 256*1024);
 	if (unlikely(ret))
 		goto out;
 
