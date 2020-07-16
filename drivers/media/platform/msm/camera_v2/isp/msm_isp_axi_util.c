@@ -17,7 +17,6 @@
 
 #define HANDLE_TO_IDX(handle) (handle & 0xFF)
 #define ISP_SOF_DEBUG_COUNT 0
-
 static int msm_isp_update_dual_HW_ms_info_at_start(
 	struct vfe_device *vfe_dev,
 	enum msm_vfe_input_src stream_src,
@@ -2148,9 +2147,11 @@ int msm_isp_drop_frame(struct vfe_device *vfe_dev,
 	return 0;
 }
 
-static enum msm_isp_camif_update_state
-	msm_isp_get_camif_update_state(struct vfe_device *vfe_dev,
-	struct msm_vfe_axi_stream_cfg_cmd *stream_cfg_cmd)
+static void msm_isp_get_camif_update_state_and_halt(
+	struct vfe_device *vfe_dev,
+	struct msm_vfe_axi_stream_cfg_cmd *stream_cfg_cmd,
+	enum msm_isp_camif_update_state *camif_update,
+	int *halt)
 {
 	int i;
 	struct msm_vfe_axi_stream *stream_info;
@@ -2175,10 +2176,10 @@ static enum msm_isp_camif_update_state
 		*halt = 0;
 
 	if ((pix_stream_cnt) &&
-	    (axi_data->src_info[VFE_PIX_0].input_mux != EXTERNAL_READ)) {
+		(axi_data->src_info[VFE_PIX_0].input_mux != EXTERNAL_READ)) {
 		if (cur_pix_stream_cnt == 0 && pix_stream_cnt &&
 			stream_cfg_cmd->cmd == START_STREAM)
-			return ENABLE_CAMIF;
+			*camif_update = ENABLE_CAMIF;
 		else if (cur_pix_stream_cnt &&
 			(cur_pix_stream_cnt - pix_stream_cnt) == 0 &&
 			(stream_cfg_cmd->cmd == STOP_STREAM ||
@@ -2922,7 +2923,8 @@ static int msm_isp_start_axi_stream(struct vfe_device *vfe_dev,
 
 static int msm_isp_stop_axi_stream(struct vfe_device *vfe_dev,
 			struct msm_vfe_axi_stream_cfg_cmd *stream_cfg_cmd,
-			enum msm_isp_camif_update_state camif_update)
+			enum msm_isp_camif_update_state camif_update,
+			int halt)
 {
 	int i, rc = 0;
 	uint8_t wait_for_complete_for_this_stream = 0;
@@ -3021,12 +3023,14 @@ static int msm_isp_stop_axi_stream(struct vfe_device *vfe_dev,
 					SRC_TO_INTF(stream_info->stream_src));
 				rc = msm_isp_axi_wait_for_cfg_done(vfe_dev,
 					camif_update, src_mask, 1);
-				if (rc < 0)
+				if (rc < 0) {
 					pr_err("%s: vfe%d cfg done failed\n",
 						__func__, vfe_dev->pdev->id);
-				else
+					stream_info->state = INACTIVE;
+				} else
 					pr_err("%s: vfe%d retry success! report err!\n",
 						__func__, vfe_dev->pdev->id);
+
 				rc = -EBUSY;
 			}
 		}
@@ -3062,6 +3066,7 @@ static int msm_isp_stop_axi_stream(struct vfe_device *vfe_dev,
 		vfe_dev->hw_info->vfe_ops.core_ops.reset_hw(vfe_dev, 0, 1);
 		vfe_dev->hw_info->vfe_ops.core_ops.init_hw_reg(vfe_dev);
 	}
+
 	msm_isp_update_camif_output_count(vfe_dev, stream_cfg_cmd);
 	msm_isp_update_stream_bandwidth(vfe_dev, stream_cfg_cmd->hw_state);
 
@@ -3097,12 +3102,19 @@ int msm_isp_cfg_axi_stream(struct vfe_device *vfe_dev, void *arg)
 	struct msm_vfe_axi_stream_cfg_cmd *stream_cfg_cmd = arg;
 	struct msm_vfe_axi_shared_data *axi_data = &vfe_dev->axi_data;
 	enum msm_isp_camif_update_state camif_update;
+	int halt = 0;
 
 	rc = msm_isp_axi_check_stream_state(vfe_dev, stream_cfg_cmd);
 	if (rc < 0) {
 		pr_err("%s: Invalid stream state\n", __func__);
 		return rc;
 	}
+
+#ifdef CONFIG_PANTECH_CAMERA//F_PANTECH_CAMERA_QCOM_PATCH_CTS_BURSTREPROCESSING
+pr_err("%s: reset_hw(vfe_dev, 0, 1) call !!\n", __func__);
+        vfe_dev->hw_info->vfe_ops.core_ops.reset_hw(vfe_dev, 0, 1);
+#endif
+
 	msm_isp_get_camif_update_state_and_halt(vfe_dev, stream_cfg_cmd,
 		&camif_update, &halt);
 	if (camif_update == DISABLE_CAMIF)
@@ -3114,7 +3126,7 @@ int msm_isp_cfg_axi_stream(struct vfe_device *vfe_dev, void *arg)
 			vfe_dev, stream_cfg_cmd, camif_update);
 	} else {
 		rc = msm_isp_stop_axi_stream(
-			vfe_dev, stream_cfg_cmd, camif_update);
+			vfe_dev, stream_cfg_cmd, camif_update, halt);
 
 		msm_isp_axi_update_cgc_override(vfe_dev, stream_cfg_cmd, 0);
 		if (axi_data->num_active_stream == 0) {
@@ -3134,9 +3146,11 @@ int msm_isp_cfg_axi_stream(struct vfe_device *vfe_dev, void *arg)
 	}
 
 	if (rc < 0)
-		pr_err("%s: start/stop stream failed\n", __func__);
+		pr_err("%s: start/stop %d stream failed\n", __func__,
+			stream_cfg_cmd->cmd);
 	return rc;
 }
+
 
 static int msm_isp_return_empty_buffer(struct vfe_device *vfe_dev,
 	struct msm_vfe_axi_stream *stream_info, uint32_t user_stream_id,
@@ -3866,6 +3880,12 @@ void msm_isp_process_axi_irq_stream(struct vfe_device *vfe_dev,
 
 
 	if (!done_buf) {
+#if 0//debugging patch // F_PANTECH_CAMERA_QBUG_ISP_PINGPONG_MISMATCH
+		if (!stream_info->controllable_output)
+			trace_printk("%d: new sw ping pong bit is %d on stream 0x%x, vfe %d\n",
+				__LINE__, stream_info->sw_ping_pong_bit,
+				stream_info->stream_id, vfe_dev->pdev->id);
+#endif
 		if (stream_info->buf_divert) {
 			vfe_dev->error_info.stream_framedrop_count[
 				stream_info->bufq_handle[

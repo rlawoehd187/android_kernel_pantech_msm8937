@@ -503,7 +503,6 @@ static long audio_cal_shared_ioctl(struct file *file, unsigned int cmd,
 			ret = -EFAULT;
 			goto unlock;
 		}
-#endif
 	}
 
 unlock:

@@ -3437,25 +3437,10 @@ static int ci13xxx_vbus_session(struct usb_gadget *_gadget, int is_active)
 #ifdef CONFIG_ANDROID_PANTECH_USB_MANAGER
         printk(KERN_ERR "vbus_gadget %s!!!\n", is_active ? "connect" : "disconnect");
 #endif
-
-	if (gadget_ready) {
-		if (is_active) {
-			hw_device_reset(udc);
-			if (udc->udc_driver->notify_event)
-				udc->udc_driver->notify_event(udc,
-					CI13XXX_CONTROLLER_CONNECT_EVENT);
-			if (udc->softconnect)
-				hw_device_state(udc->ep0out.qh.dma);
 #ifdef CONFIG_ANDROID_PANTECH_USB_MANAGER
 			if(b_pantech_usb_module && udc->softconnect)
 				pantech_vbus_connect();
 #endif
-		} else {
-			hw_device_state(0);
-			_gadget_stop_activity(&udc->gadget);
-			if (udc->udc_driver->notify_event)
-				udc->udc_driver->notify_event(udc,
-					CI13XXX_CONTROLLER_DISCONNECT_EVENT);
 #ifdef CONFIG_ANDROID_PANTECH_USB_MANAGER
 			if(b_pantech_usb_module)
 				pantech_vbus_disconnect();
