@@ -982,6 +982,10 @@ static int eeprom_init_config(struct msm_eeprom_ctrl_t *e_ctrl,
 	rc = eeprom_parse_memory_map(e_ctrl, memory_map_arr);
 	if (rc < 0) {
 		pr_err("%s::%d memory map parse failed\n", __func__, __LINE__);
+#if defined(CONFIG_PANTECH_CAMERA) && defined(CONFIG_PANTECH_CAMERA_FRONT_OTP)
+        pr_err("%s:%d msm_camera_power_down call! \n", __func__, __LINE__);
+        msm_camera_power_down(power_info, e_ctrl->eeprom_device_type, &e_ctrl->i2c_client);
+#endif        
 	}
 
 	rc = msm_camera_power_down(power_info, e_ctrl->eeprom_device_type,
