@@ -4117,7 +4117,6 @@ static int mdss_dsi_parse_gpio_params(struct platform_device *ctrl_pdev,
 	struct mdss_dsi_ctrl_pdata *ctrl_pdata)
 {
 	struct mdss_panel_info *pinfo = &(ctrl_pdata->panel_data.panel_info);
-	struct mdss_panel_data *pdata = &ctrl_pdata->panel_data;
 
 #if defined (CONFIG_F_SKYDISP_EF71_SS)
 	int rc;
@@ -4373,6 +4372,8 @@ static int mdss_dsi_parse_gpio_params(struct platform_device *ctrl_pdev,
 	}
 
 #else	
+	struct mdss_panel_data *pdata = &ctrl_pdata->panel_data;
+
 	/*
 	 * If disp_en_gpio has been set previously (disp_en_gpio > 0)
 	 *  while parsing the panel node, then do not override it

@@ -152,13 +152,13 @@
 	qcom,partial-update-enabled;
 	qcom,panel-roi-alignment = <2 2 2 2 2 2>;
 };
-*/
 
 &dsi_icn9706_720_1440_vid {
 	qcom,panel-supply-entries = <&dsi_panel_pwr_supply>;
 	qcom,mdss-dsi-pan-enable-dynamic-fps;
 	qcom,mdss-dsi-pan-fps-update = "dfps_immediate_porch_mode_vfp";
 };
+*/
 
 &tlmm {
 	tlmm_gpio_key {
