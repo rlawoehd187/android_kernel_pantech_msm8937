@@ -801,6 +801,9 @@ struct mdss_panel_data {
         int silent_flag;
         int silent_backlight;
 #endif
+
+	int panel_te_gpio;
+	struct completion te_done;
 };
 
 struct mdss_panel_debugfs_info {
