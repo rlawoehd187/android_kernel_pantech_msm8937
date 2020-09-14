@@ -625,6 +625,29 @@ else
 KBUILD_CFLAGS	+= -O2
 endif
 
+KBUILD_CFLAGS	+= -Os $(call cc-disable-warning,attributes)
+KBUILD_CFLAGS	+= -Os $(call cc-disable-warning,attribute-alias)
+KBUILD_CFLAGS	+= -Os $(call cc-disable-warning,unused-const-variable)
+KBUILD_CFLAGS	+= -Os $(call cc-disable-warning,stringop-overflow)
+KBUILD_CFLAGS	+= -Os $(call cc-disable-warning,sizeof-pointer-memaccess)
+KBUILD_CFLAGS	+= -Os $(call cc-disable-warning,format-truncation)
+KBUILD_CFLAGS	+= -Os $(call cc-disable-warning,packed-not-aligned)
+KBUILD_CFLAGS	+= -Os $(call cc-disable-warning,address-of-packed-member)
+KBUILD_CFLAGS	+= -Os $(call cc-disable-warning,bool-operation)
+KBUILD_CFLAGS	+= -Os $(call cc-disable-warning,missing-attributes)
+KBUILD_CFLAGS	+= -Os $(call cc-disable-warning,array-bounds)
+KBUILD_CFLAGS	+= -Os $(call cc-disable-warning,format-overflow)
+KBUILD_CFLAGS	+= -Os $(call cc-disable-warning,duplicate-decl-specifier)
+KBUILD_CFLAGS	+= -Os $(call cc-disable-warning,misleading-indentation)
+KBUILD_CFLAGS	+= -Os $(call cc-disable-warning,memset-elt-size)
+KBUILD_CFLAGS	+= -Os $(call cc-disable-warning,parentheses)
+KBUILD_CFLAGS	+= -Os $(call cc-disable-warning,switch-unreachable)
+KBUILD_CFLAGS	+= -Os $(call cc-disable-warning,bool-compare)
+KBUILD_CFLAGS	+= -Os $(call cc-disable-warning,int-in-bool-context)
+KBUILD_CFLAGS	+= -Os $(call cc-disable-warning,discarded-array-qualifiers)
+KBUILD_CFLAGS	+= -Os $(call cc-disable-warning,shift-count-overflow)
+KBUILD_CFLAGS	+= -Os $(call cc-disable-warning,int-to-pointer-cast)
+
 # Tell gcc to never replace conditional load with a non-conditional one
 KBUILD_CFLAGS	+= $(call cc-option,--param=allow-store-data-races=0)
 
