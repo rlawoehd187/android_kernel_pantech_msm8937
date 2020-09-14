@@ -1390,7 +1390,7 @@ static ssize_t qpnp_hap_max_show(struct device *dev,
 
 	return scnprintf(buf, PAGE_SIZE, "%d\n", hap->vtg_max);
 }
-/*
+
 static ssize_t qpnp_hap_default_show(struct device *dev,
 					struct device_attribute *attr,
 					char *buf)
@@ -1401,7 +1401,7 @@ static ssize_t qpnp_hap_default_show(struct device *dev,
 
 	return scnprintf(buf, PAGE_SIZE, "%d\n", hap->vtg_default);
 }
-*/
+
 /* sysfs attributes */
 static struct device_attribute qpnp_hap_attrs[] = {
 	__ATTR(wf_s0, (S_IRUGO | S_IWUSR | S_IWGRP),
@@ -1459,7 +1459,7 @@ static struct device_attribute qpnp_hap_attrs[] = {
 			qpnp_hap_max_show,
 			NULL),
 	__ATTR(vtg_default, S_IRUGO,
-			qpnp_hap_max_show,
+			qpnp_hap_default_show,
 			NULL),
 };
 
