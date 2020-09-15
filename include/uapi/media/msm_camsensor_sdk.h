@@ -1,3 +1,6 @@
+#ifdef CONFIG_MACH_MSM8937_EF71S
+#include "msm_camsensor_sdk-ef71.h"
+#else
 #ifndef __UAPI_LINUX_MSM_CAMSENSOR_SDK_H
 #define __UAPI_LINUX_MSM_CAMSENSOR_SDK_H
 
@@ -111,12 +114,6 @@ enum msm_sensor_power_seq_gpio_t {
 	SENSOR_GPIO_FL_RESET,
 	SENSOR_GPIO_CUSTOM1,
 	SENSOR_GPIO_CUSTOM2,
-#if 1//def CONFIG_PANTECH_CAMERA
-    SENSOR_GPIO_DVDD_EN,
-    SENSOR_GPIO_IOVDD_EN,
-    SENSOR_GPIO_AVDD_EN,
-    SENSOR_GPIO_VDDIO_EN,
-#endif
 	SENSOR_GPIO_MAX,
 };
 
@@ -421,3 +418,4 @@ struct msm_camera_i2c_reg_setting_array {
 };
 
 #endif
+#endif /* MSMB_CAMERA_EF71 */
