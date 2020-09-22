@@ -15,12 +15,6 @@ menuconfig MSM_CAMERA
 	  adds support for the camera driver stack including sensor, isp
 	  and postprocessing drivers for legacy chipsets.
 
-config PANTECH_CAMERA
-	bool "Pantech MSM camera and video capture support"
-	depends on ARCH_MSM && VIDEO_V4L2 && I2C
-	---help---
-	  Pantech Camera Support.
-
 config MSM_CAMERA_DEBUG
 	bool "Qualcomm MSM camera debugging with printk"
 	depends on MSM_CAMERA
@@ -52,9 +46,6 @@ config MSMB_CAMERA_DEBUG
 
 if MSMB_CAMERA
 source "drivers/media/platform/msm/camera_v2/Kconfig"
-if CONFIG_PANTECH_CAMERA
-source "drivers/media/platform/msm/camera_v2-ef71/Kconfig"
-endif
 endif # MSMB_CAMERA
 source "drivers/media/platform/msm/dvb/Kconfig"
 source "drivers/media/platform/msm/broadcast/Kconfig"
