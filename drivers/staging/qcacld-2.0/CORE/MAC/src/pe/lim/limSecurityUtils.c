@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2015 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2013-2017 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -40,7 +40,7 @@
 #include "wniApi.h"
 
 #include "sirCommon.h"
-#include "wniCfgSta.h"
+#include "wni_cfg.h"
 #include "cfgApi.h"
 
 
@@ -456,10 +456,6 @@ limDeletePreAuthNode(tpAniSirGlobal pMac, tSirMacAddr macAddr)
 
 } /*** end limDeletePreAuthNode() ***/
 
-
-
-
-
 /**
  * limRestoreFromPreAuthState
  *
@@ -504,13 +500,6 @@ limRestoreFromAuthState(tpAniSirGlobal pMac, tSirResultCodes resultCode, tANI_U1
     /* Update PE session ID*/
     mlmAuthCnf.sessionId = sessionEntry->peSessionId;
 
-    /// Free up buffer allocated
-    /// for pMac->lim.gLimMlmAuthReq
-    vos_mem_free(pMac->lim.gpLimMlmAuthReq);
-    pMac->lim.gpLimMlmAuthReq = NULL;
-
-    sessionEntry->limMlmState = sessionEntry->limPrevMlmState;
-
     MTRACE(macTrace(pMac, TRACE_CODE_MLM_STATE, sessionEntry->peSessionId, sessionEntry->limMlmState));
     /* Set the authAckStatus status flag as sucess as
      * host have received the auth rsp and no longer auth
@@ -529,12 +518,26 @@ limRestoreFromAuthState(tpAniSirGlobal pMac, tSirResultCodes resultCode, tANI_U1
         pMac->lim.gLimPreAuthChannelNumber = 0;
     }
 
-    limPostSmeMessage(pMac,
+    if ((protStatusCode == eSIR_MAC_MAX_ASSOC_STA_REACHED_STATUS)
+             && (sessionEntry->sta_auth_retries_for_code17 <
+                            pMac->sta_auth_retries_for_code17)) {
+        limLog(pMac, LOG1, FL("Retry Auth "));
+        limDoSendAuthMgmtFrame(pMac, sessionEntry);
+        sessionEntry->sta_auth_retries_for_code17++;
+    } else {
+        /// Free up buffer allocated
+        /// for pMac->lim.gLimMlmAuthReq
+        vos_mem_free(pMac->lim.gpLimMlmAuthReq);
+        pMac->lim.gpLimMlmAuthReq = NULL;
+
+        sessionEntry->limMlmState = sessionEntry->limPrevMlmState;
+
+        limPostSmeMessage(pMac,
                       LIM_MLM_AUTH_CNF,
                       (tANI_U32 *) &mlmAuthCnf);
+        sessionEntry->sta_auth_retries_for_code17 = 0;
+    }
 } /*** end limRestoreFromAuthState() ***/
-
-
 
 /**
  * limLookUpKeyMappings()
@@ -611,7 +614,7 @@ limEncryptAuthFrame(tpAniSirGlobal pMac, tANI_U8 keyId, tANI_U8 *pKey, tANI_U8 *
     // Compute CRC-32 and place them in last 4 bytes of plain text
     limComputeCrc32(icv, pPlainText, framelen);
 
-    vos_mem_copy( pPlainText + framelen,
+    vos_mem_copy((pPlainText + framelen),
                   icv, SIR_MAC_WEP_ICV_LENGTH);
 
     // Run RC4 on plain text with the seed

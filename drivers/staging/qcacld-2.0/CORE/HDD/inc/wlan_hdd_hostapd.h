@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2017 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2013-2018 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -123,7 +123,20 @@ hdd_set_sap_auth_offload(hdd_adapter_t *pHostapdAdapter, bool enabled)
 {
 }
 #endif /* SAP_AUTH_OFFLOAD */
+
 int hdd_softap_set_channel_change(struct net_device *dev, int target_channel);
+#ifdef WLAN_FEATURE_SAP_TO_FOLLOW_STA_CHAN
+VOS_STATUS hdd_sta_state_sap_notify(hdd_context_t *hdd_context,
+                                sta_sap_notifications event,
+                                struct wlan_sap_csa_info csa_info);
+VOS_STATUS hdd_send_sap_event(struct net_device *dev,
+                sta_sap_notifications event,
+                struct wlan_sap_csa_info csa_info,
+                struct wireless_dev *wdev);
+void hdd_hostapd_chan_switch_cb(v_PVOID_t usrDataForCallback);
+
+int hdd_softap_set_channel_change(struct net_device *dev, int target_channel);
+#endif //WLAN_FEATURE_SAP_TO_FOLLOW_STA_CHAN
 
 /**
  * hdd_is_sta_connection_pending() - This function will check if sta connection
@@ -223,4 +236,39 @@ hdd_change_ch_avoidance_status(hdd_context_t *hdd_ctx,
     hddLog(LOG1, FL("is_ch_avoid_in_progress %d"), value);
 }
 
+#ifdef FEATURE_WLAN_SUB_20_MHZ
+bool hdd_hostapd_sub20_channelwidth_can_switch(
+	hdd_adapter_t *adapter, uint32_t *sub20_channel_width);
+bool hdd_hostapd_sub20_channelwidth_can_restore(
+	hdd_adapter_t *adapter);
+bool hdd_sub20_channelwidth_can_set(
+	hdd_adapter_t *adapter, uint32_t sub20_channel_width);
+int hdd_softap_set_channel_sub20_chanwidth_change(
+	struct net_device *dev, uint32_t chan_width);
+#else
+static inline bool hdd_hostapd_sub20_channelwidth_can_switch(
+	hdd_adapter_t *adapter, uint32_t *sub20_channel_width)
+{
+	return false;
+}
+
+static inline bool hdd_hostapd_sub20_channelwidth_can_restore(
+	hdd_adapter_t *adapter)
+{
+	return false;
+}
+
+static inline bool hdd_sub20_channelwidth_can_set(
+	hdd_adapter_t *adapter, uint32_t sub20_channel_width)
+{
+	return false;
+}
+
+static inline
+int hdd_softap_set_channel_sub20_chanwidth_change(
+	struct net_device *dev, uint32_t chan_width)
+{
+	return -ENOTSUPP;
+}
+#endif
 #endif    // end #if !defined( WLAN_HDD_HOSTAPD_H )

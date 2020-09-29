@@ -60,7 +60,6 @@ config CRYPTO_SHA512_ARM_NEON
 
 config CRYPTO_AES_ARM
 	tristate "AES cipher algorithms (ARM-asm)"
-	depends on ARM
 	select CRYPTO_ALGAPI
 	select CRYPTO_AES
 	help

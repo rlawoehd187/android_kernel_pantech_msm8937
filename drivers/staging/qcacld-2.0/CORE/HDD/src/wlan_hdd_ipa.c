@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2017 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2013-2018 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -217,11 +217,10 @@ struct hdd_ipa_uc_rx_hdr {
 #define HDD_IPA_DP_LOG(LVL, fmt, args...) VOS_TRACE(VOS_MODULE_ID_HDD_DATA, LVL, \
 					"%s:%d: "fmt, __func__, __LINE__, ## args)
 
-
 #define HDD_IPA_DBG_DUMP(_lvl, _prefix, _buf, _len) \
 	do {\
-		VOS_TRACE(VOS_MODULE_ID_HDD, _lvl, "%s:", _prefix); \
-		VOS_TRACE_HEX_DUMP(VOS_MODULE_ID_HDD, _lvl, _buf, _len); \
+		VOS_TRACE(VOS_MODULE_ID_HDD_DATA, _lvl, "%s:", _prefix); \
+		VOS_TRACE_HEX_DUMP(VOS_MODULE_ID_HDD_DATA, _lvl, _buf, _len); \
 	} while(0)
 
 #define DBG_DUMP_RX_LEN 32
@@ -1210,7 +1209,20 @@ void hdd_ipa_dump_iface_context(struct hdd_ipa_priv *hdd_ipa)
  */
 void hdd_ipa_dump_info(hdd_context_t *hdd_ctx)
 {
-	struct hdd_ipa_priv *hdd_ipa = (struct hdd_ipa_priv *)hdd_ctx->hdd_ipa;
+	struct hdd_ipa_priv *hdd_ipa;
+
+	if (wlan_hdd_validate_context(hdd_ctx))
+		return;
+
+	hdd_ipa = (struct hdd_ipa_priv *)hdd_ctx->hdd_ipa;
+	if (!hdd_ipa_is_enabled(hdd_ctx) ||
+	    !hdd_ipa_uc_is_enabled(hdd_ipa)) {
+		HDD_IPA_LOG(VOS_TRACE_LEVEL_ERROR,
+			"IPA/IPA UC is not enabled, IpaConfig %u,IpaUcOffloadEnabled %u.",
+			hdd_ctx->cfg_ini->IpaConfig,
+			hdd_ctx->cfg_ini->IpaUcOffloadEnabled);
+		return;
+	}
 
 	hdd_ipa_dump_hdd_ipa(hdd_ipa);
 	hdd_ipa_dump_sys_pipe(hdd_ipa);
@@ -2243,7 +2255,7 @@ static int hdd_ipa_uc_disconnect_client(hdd_adapter_t *adapter)
 
 	for (i = 0; i < WLAN_MAX_STA_COUNT; i++) {
 		if (vos_is_macaddr_broadcast(&adapter->aStaInfo[i].macAddrSTA))
-			return ret;
+			continue;
 		if ((adapter->aStaInfo[i].isUsed) &&
 		   (!adapter->aStaInfo[i].isDeauthInProgress) &&
 		   hdd_ipa->sap_num_connected_sta) {
@@ -2989,7 +3001,7 @@ static void hdd_ipa_destory_rm_resource(struct hdd_ipa_priv *hdd_ipa)
 static void hdd_ipa_send_skb_to_network(adf_nbuf_t skb, hdd_adapter_t *adapter)
 {
 	int result;
-#ifndef QCA_CONFIG_SMP
+#if !defined(QCA_CONFIG_SMP) || defined(HDD_IPA_RX_SOFTIRQ_THRESH)
 	struct iphdr* ip_h;
 	static atomic_t softirq_mitigation_cntr =
 		ATOMIC_INIT(IPA_WLAN_RX_SOFTIRQ_THRESH);
@@ -3019,7 +3031,7 @@ static void hdd_ipa_send_skb_to_network(adf_nbuf_t skb, hdd_adapter_t *adapter)
 	cpu_index = wlan_hdd_get_cpu();
 
 	++adapter->hdd_stats.hddTxRxStats.rxPackets[cpu_index];
-#ifdef QCA_CONFIG_SMP
+#if defined(QCA_CONFIG_SMP) && !defined(HDD_IPA_RX_SOFTIRQ_THRESH)
 	result = netif_rx_ni(skb);
 #else
 	ip_h = (struct iphdr*)((uint8_t*)skb->data);
@@ -3045,7 +3057,9 @@ static void hdd_ipa_send_skb_to_network(adf_nbuf_t skb, hdd_adapter_t *adapter)
 		++adapter->hdd_stats.hddTxRxStats.rxRefused[cpu_index];
 
 	HDD_IPA_INCREASE_NET_SEND_COUNT(hdd_ipa);
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(4,11,0))
 	adapter->dev->last_rx = jiffies;
+#endif
 }
 
 VOS_STATUS hdd_ipa_process_rxt(v_VOID_t *vosContext, adf_nbuf_t rx_buf_list,
@@ -3292,6 +3306,9 @@ static void hdd_ipa_w2i_cb(void *priv, enum ipa_dp_evt_type evt,
 
 	hdd_ipa = (struct hdd_ipa_priv *)priv;
 
+	if (!hdd_ipa || wlan_hdd_validate_context(hdd_ipa->hdd_ctx))
+		return;
+
 	switch (evt) {
 	case IPA_RECEIVE:
 		skb = (adf_nbuf_t) data;
@@ -3434,12 +3451,15 @@ static void hdd_ipa_send_pkt_to_tl(struct hdd_ipa_iface_context *iface_context,
 	 * During CAC period, data packets shouldn't be sent over the air so
 	 * drop all the packets here
 	 */
-	if (WLAN_HDD_GET_AP_CTX_PTR(adapter)->dfs_cac_block_tx) {
-		ipa_free_skb(ipa_tx_desc);
-		adf_os_spin_unlock_bh(&iface_context->interface_lock);
-		iface_context->stats.num_tx_cac_drop++;
-		hdd_ipa_rm_try_release(hdd_ipa);
-		return;
+	if (WLAN_HDD_SOFTAP == adapter->device_mode ||
+	    WLAN_HDD_P2P_GO == adapter->device_mode) {
+		if (WLAN_HDD_GET_AP_CTX_PTR(adapter)->dfs_cac_block_tx) {
+			ipa_free_skb(ipa_tx_desc);
+			adf_os_spin_unlock_bh(&iface_context->interface_lock);
+			iface_context->stats.num_tx_cac_drop++;
+			hdd_ipa_rm_try_release(hdd_ipa);
+			return;
+		}
 	}
 
 	interface_id = adapter->sessionId;
@@ -4499,21 +4519,24 @@ int hdd_ipa_wlan_evt(hdd_adapter_t *adapter, uint8_t sta_id,
 			vos_lock_release(&hdd_ipa->event_lock);
 			return -EINVAL;
 		}
-		hdd_ipa->sta_connected = 0;
+
 		if (!hdd_ipa_uc_is_enabled(hdd_ipa)) {
 			HDD_IPA_LOG(VOS_TRACE_LEVEL_INFO,
 				"%s: IPA UC OFFLOAD NOT ENABLED",
 				msg_ex->name);
 		} else {
 			/* Disable IPA UC TX PIPE when STA disconnected */
-			if ((!hdd_ipa->sap_num_connected_sta) ||
-				((!hdd_ipa->num_iface) &&
-					(HDD_IPA_UC_NUM_WDI_PIPE ==
-					hdd_ipa->activated_fw_pipe &&
-					!hdd_ipa->ipa_pipes_down))) {
+			if ((!hdd_ipa->sap_num_connected_sta &&
+			     hdd_ipa->sta_connected) ||
+			    (!hdd_ipa->num_iface &&
+			    (HDD_IPA_UC_NUM_WDI_PIPE ==
+					hdd_ipa->activated_fw_pipe) &&
+			    !hdd_ipa->ipa_pipes_down)) {
 				hdd_ipa_uc_handle_last_discon(hdd_ipa);
 			}
 		}
+
+		hdd_ipa->sta_connected = 0;
 
 		vos_lock_release(&hdd_ipa->event_lock);
 

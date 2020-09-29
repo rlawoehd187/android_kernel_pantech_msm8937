@@ -70,13 +70,6 @@
 
 #include "ci13xxx_udc.h"
 
-#ifdef CONFIG_ANDROID_PANTECH_USB_MANAGER
-extern void pantech_init_device_mode_change(void);
-extern bool b_pantech_usb_module;
-extern int pantech_vbus_connect(void);
-extern int pantech_vbus_disconnect(void);
-#endif
-
 /******************************************************************************
  * DEFINE
  *****************************************************************************/
@@ -3086,8 +3079,11 @@ static int ep_queue(struct usb_ep *ep, struct usb_request *req,
 
 	trace("%pK, %pK, %X", ep, req, gfp_flags);
 
+	if (ep == NULL)
+		return -EINVAL;
+
 	spin_lock_irqsave(mEp->lock, flags);
-	if (ep == NULL || req == NULL || mEp->desc == NULL) {
+	if (req == NULL || mEp->desc == NULL) {
 		retval = -EINVAL;
 		goto done;
 	}
@@ -3226,12 +3222,16 @@ static int ep_dequeue(struct usb_ep *ep, struct usb_request *req)
 				__func__);
 		return -EAGAIN;
 	}
+
+	if (ep == NULL)
+		return -EINVAL;
+
 	spin_lock_irqsave(mEp->lock, flags);
 	/*
 	 * Only ep0 IN is exposed to composite.  When a req is dequeued
 	 * on ep0, check both ep0 IN and ep0 OUT queues.
 	 */
-	if (ep == NULL || req == NULL || mReq->req.status != -EALREADY ||
+	if (req == NULL || mReq->req.status != -EALREADY ||
 		mEp->desc == NULL || list_empty(&mReq->queue) ||
 		(list_empty(&mEp->qh.queue) && ((mEp->type !=
 			USB_ENDPOINT_XFER_CONTROL) ||
@@ -3258,6 +3258,19 @@ static int ep_dequeue(struct usb_ep *ep, struct usb_request *req)
 		mReq->map     = 0;
 	}
 	req->status = -ECONNRESET;
+
+	if (mEp->last_zptr) {
+		dma_pool_free(mEp->td_pool, mEp->last_zptr, mEp->last_zdma);
+		mEp->last_zptr = NULL;
+		mEp->last_zdma = 0;
+	}
+
+	if (mReq->zptr) {
+		dma_pool_free(mEp->td_pool, mReq->zptr, mReq->zdma);
+		mReq->zptr = NULL;
+		mReq->zdma = 0;
+	}
+
 	if (mEp->multi_req) {
 		restore_original_req(mReq);
 		mEp->multi_req = false;
@@ -3491,9 +3504,6 @@ static int ci13xxx_pullup(struct usb_gadget *_gadget, int is_active)
 {
 	struct ci13xxx *udc = container_of(_gadget, struct ci13xxx, gadget);
 	unsigned long flags;
-#ifdef CONFIG_ANDROID_PANTECH_USB_MANAGER
-	pantech_init_device_mode_change();
-#endif
 
 	spin_lock_irqsave(udc->lock, flags);
 	udc->softconnect = is_active;

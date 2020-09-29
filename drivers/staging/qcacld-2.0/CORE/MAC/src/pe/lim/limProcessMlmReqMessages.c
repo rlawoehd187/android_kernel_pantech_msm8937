@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2016 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2011-2018 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -36,7 +36,7 @@
  *
  */
 #include "palTypes.h"
-#include "wniCfgSta.h"
+#include "wni_cfg.h"
 #include "aniGlobal.h"
 #include "sirApi.h"
 #include "sirParams.h"
@@ -58,7 +58,7 @@
 #ifdef FEATURE_WLAN_DIAG_SUPPORT_LIM
 #include "vos_diag_core_log.h"
 #endif
-
+#include "lim_process_fils.h"
 
 // MLM REQ processing function templates
 static void limProcessMlmStartReq(tpAniSirGlobal, tANI_U32 *);
@@ -704,8 +704,47 @@ void limSetDFSChannelList(tpAniSirGlobal pMac,tANI_U8 channelNum, tSirDFSChannel
     return;
 }
 
+void limDoSendAuthMgmtFrame(tpAniSirGlobal pMac, tpPESession psessionEntry)
+{
+        tSirMacAuthFrameBody    authFrameBody;
 
+        //Prepare & send Authentication frame
+        authFrameBody.authAlgoNumber =
+                        (tANI_U8) pMac->lim.gpLimMlmAuthReq->authType;
+        authFrameBody.authTransactionSeqNumber = SIR_MAC_AUTH_FRAME_1;
+        authFrameBody.authStatusCode = 0;
+        pMac->auth_ack_status = LIM_AUTH_ACK_NOT_RCD;
 
+#ifdef FEATURE_WLAN_DIAG_SUPPORT
+        limDiagEventReport(pMac, WLAN_PE_DIAG_AUTH_START_EVENT, psessionEntry,
+                           eSIR_SUCCESS, authFrameBody.authStatusCode);
+#endif
+
+        limSendAuthMgmtFrame(pMac,
+                        &authFrameBody,
+                        pMac->lim.gpLimMlmAuthReq->peerMacAddr,
+                        LIM_NO_WEP_IN_FC, psessionEntry, eSIR_TRUE);
+        if (tx_timer_activate(&pMac->lim.limTimers.gLimAuthFailureTimer)
+                        != TX_SUCCESS) {
+                //Could not start Auth failure timer.
+                //Log error
+                limLog(pMac, LOGP,
+                FL("could not start Auth failure timer"));
+                //Cleanup as if auth timer expired
+                limProcessAuthFailureTimeout(pMac);
+        } else {
+                MTRACE(macTrace(pMac, TRACE_CODE_TIMER_ACTIVATE,
+                        psessionEntry->peSessionId, eLIM_AUTH_RETRY_TIMER));
+                //Activate Auth Retry timer
+                if (tx_timer_activate
+                        (&pMac->lim.limTimers.g_lim_periodic_auth_retry_timer)
+                                            != TX_SUCCESS) {
+                        limLog(pMac, LOGP,
+                                  FL("could not activate Auth Retry timer"));
+                }
+        }
+        return;
+}
 
 /*
 * Creates a Raw frame to be sent before every Scan, if required.
@@ -1573,8 +1612,15 @@ limMlmAddBss (
     pAddBssParams->cfParamSet.cfpDurRemaining   = pMlmStartReq->cfParamSet.cfpDurRemaining;
 
     pAddBssParams->rateSet.numRates = pMlmStartReq->rateSet.numRates;
+    if (pAddBssParams->rateSet.numRates > SIR_MAC_RATESET_EID_MAX) {
+        limLog(pMac, LOGW,
+               FL("num of sup rates %d exceeding the limit %d, resetting"),
+               pAddBssParams->rateSet.numRates,
+               SIR_MAC_RATESET_EID_MAX);
+        pAddBssParams->rateSet.numRates = SIR_MAC_RATESET_EID_MAX;
+    }
     vos_mem_copy(pAddBssParams->rateSet.rate,
-                 pMlmStartReq->rateSet.rate, pMlmStartReq->rateSet.numRates);
+                 pMlmStartReq->rateSet.rate, pAddBssParams->rateSet.numRates);
 
     pAddBssParams->nwType = pMlmStartReq->nwType;
 
@@ -1598,10 +1644,18 @@ limMlmAddBss (
     pAddBssParams->sessionId            = pMlmStartReq->sessionId;
 
     //Send the SSID to HAL to enable SSID matching for IBSS
+    pAddBssParams->ssId.length = pMlmStartReq->ssId.length;
+    if (pAddBssParams->ssId.length > SIR_MAC_MAX_SSID_LENGTH) {
+        limLog(pMac, LOGE,
+               FL("Invalid ssid length %d, max length allowed %d"),
+               pAddBssParams->ssId.length,
+               SIR_MAC_MAX_SSID_LENGTH);
+        vos_mem_free(pAddBssParams);
+        return eSIR_SME_INVALID_PARAMETERS;
+    }
     vos_mem_copy(&(pAddBssParams->ssId.ssId),
                  pMlmStartReq->ssId.ssId,
-                 pMlmStartReq->ssId.length);
-    pAddBssParams->ssId.length = pMlmStartReq->ssId.length;
+                 pAddBssParams->ssId.length);
     pAddBssParams->bHiddenSSIDEn = pMlmStartReq->ssidHidden;
     limLog( pMac, LOGE, FL( "TRYING TO HIDE SSID %d" ),pAddBssParams->bHiddenSSIDEn);
     // CR309183. Disable Proxy Probe Rsp.  Host handles Probe Requests.  Until FW fixed.
@@ -1641,6 +1695,11 @@ limMlmAddBss (
     pAddBssParams->dot11_mode = psessionEntry->dot11mode;
 
     pAddBssParams->beacon_tx_rate = pMlmStartReq->beacon_tx_rate;
+
+    if (psessionEntry->sub20_channelwidth == SUB20_MODE_5MHZ)
+            pAddBssParams->channelwidth = CH_WIDTH_5MHZ;
+    else if (psessionEntry->sub20_channelwidth == SUB20_MODE_10MHZ)
+            pAddBssParams->channelwidth = CH_WIDTH_10MHZ;
 
     limLog(pMac, LOG2, FL("dot11_mode:%d"), pAddBssParams->dot11_mode);
 
@@ -2235,7 +2294,6 @@ limProcessMlmAuthReq(tpAniSirGlobal pMac, tANI_U32 *pMsgBuf)
 {
     tANI_U32                numPreAuthContexts;
     tSirMacAddr             currentBssId;
-    tSirMacAuthFrameBody    authFrameBody;
     tLimMlmAuthCnf          mlmAuthCnf;
     struct tLimPreAuthNode  *preAuthNode;
     tpDphHashNode           pStaDs;
@@ -2356,21 +2414,6 @@ limProcessMlmAuthReq(tpAniSirGlobal pMac, tANI_U32 *pMsgBuf)
         psessionEntry->limMlmState = eLIM_MLM_WT_AUTH_FRAME2_STATE;
         MTRACE(macTrace(pMac, TRACE_CODE_MLM_STATE, psessionEntry->peSessionId, psessionEntry->limMlmState));
 
-        /// Prepare & send Authentication frame
-        authFrameBody.authAlgoNumber =
-                                  (tANI_U8) pMac->lim.gpLimMlmAuthReq->authType;
-        authFrameBody.authTransactionSeqNumber = SIR_MAC_AUTH_FRAME_1;
-        authFrameBody.authStatusCode = 0;
-#ifdef FEATURE_WLAN_DIAG_SUPPORT
-        limDiagEventReport(pMac, WLAN_PE_DIAG_AUTH_START_EVENT, psessionEntry,
-                           eSIR_SUCCESS, authFrameBody.authStatusCode);
-#endif
-        pMac->auth_ack_status = LIM_AUTH_ACK_NOT_RCD;
-        limSendAuthMgmtFrame(pMac,
-                             &authFrameBody,
-                             pMac->lim.gpLimMlmAuthReq->peerMacAddr,
-                             LIM_NO_WEP_IN_FC, psessionEntry, eSIR_TRUE);
-
         //assign appropriate sessionId to the timer object
         pMac->lim.limTimers.gLimAuthFailureTimer.sessionId = sessionId;
 
@@ -2379,26 +2422,9 @@ limProcessMlmAuthReq(tpAniSirGlobal pMac, tANI_U32 *pMsgBuf)
         limDeactivateAndChangeTimer(pMac, eLIM_AUTH_RETRY_TIMER);
         /* Activate Auth failure timer */
         MTRACE(macTrace(pMac, TRACE_CODE_TIMER_ACTIVATE, psessionEntry->peSessionId, eLIM_AUTH_FAIL_TIMER));
-        if (tx_timer_activate(&pMac->lim.limTimers.gLimAuthFailureTimer)
-                                       != TX_SUCCESS)
-        {
-            /// Could not start Auth failure timer.
-            // Log error
-            limLog(pMac, LOGP,
-                   FL("could not start Auth failure timer"));
-            /* Clean up as if auth timer expired */
-            limProcessAuthFailureTimeout(pMac);
-        } else {
-            MTRACE(macTrace(pMac, TRACE_CODE_TIMER_ACTIVATE,
-                    psessionEntry->peSessionId, eLIM_AUTH_RETRY_TIMER));
-            /* Activate Auth Retry timer */
-            if (tx_timer_activate
-                  (&pMac->lim.limTimers.g_lim_periodic_auth_retry_timer)
-                                                          != TX_SUCCESS) {
-               limLog(pMac, LOGP, FL("could not activate Auth Retry timer"));
-            }
-        }
-        return;
+
+	limDoSendAuthMgmtFrame(pMac, psessionEntry);
+	return;
     }
     else
     {
@@ -3632,18 +3658,18 @@ tLimMlmRemoveKeyCnf  mlmRemoveKeyCnf;
 
 
       goto end;
-  } else {
-    staIdx = pStaDs->staIndex;
-
-
-
-    psessionEntry->limMlmState = eLIM_MLM_WT_REMOVE_STA_KEY_STATE;
-    MTRACE(macTrace(pMac, TRACE_CODE_MLM_STATE, psessionEntry->peSessionId, psessionEntry->limMlmState));
-
-    // Package WDA_REMOVE_STAKEY_REQ message parameters
-    limSendRemoveStaKeyReq( pMac,pMlmRemoveKeyReq,staIdx,psessionEntry);
-    return;
   }
+  else
+      staIdx = pStaDs->staIndex;
+
+  psessionEntry->limMlmState = eLIM_MLM_WT_REMOVE_STA_KEY_STATE;
+  MTRACE(
+      macTrace(pMac, TRACE_CODE_MLM_STATE, psessionEntry->peSessionId,
+      psessionEntry->limMlmState));
+
+  // Package WDA_REMOVE_STAKEY_REQ message parameters
+  limSendRemoveStaKeyReq( pMac,pMlmRemoveKeyReq,staIdx,psessionEntry);
+  return;
 
 end:
     limPostSmeRemoveKeyCnf( pMac,
@@ -3696,7 +3722,7 @@ limProcessMinChannelTimeout(tpAniSirGlobal pMac)
         {
             // This shouldn't be the case, but when this happens, this timeout should be for the last channelId.
             // Get the channelNum as close to correct as possible.
-            if(pMac->lim.gpLimMlmScanReq->channelList.channelNumber)
+            if (pMac->lim.gpLimMlmScanReq->channelList.numChannels > 0)
             {
                 channelNum = pMac->lim.gpLimMlmScanReq->channelList.channelNumber[pMac->lim.gpLimMlmScanReq->channelList.numChannels - 1];
             }
@@ -3772,7 +3798,7 @@ limProcessMaxChannelTimeout(tpAniSirGlobal pMac)
         }
         else
         {
-            if(pMac->lim.gpLimMlmScanReq->channelList.channelNumber)
+            if (pMac->lim.gpLimMlmScanReq->channelList.numChannels > 0)
             {
                 channelNum = pMac->lim.gpLimMlmScanReq->channelList.channelNumber[pMac->lim.gpLimMlmScanReq->channelList.numChannels - 1];
             }
@@ -4079,6 +4105,7 @@ static void lim_process_auth_retry_timer(tpAniSirGlobal mac_ctx)
 			auth_frame.authStatusCode = 0;
 			limLog(mac_ctx, LOGW, FL("Retry Auth "));
 			mac_ctx->auth_ack_status = LIM_AUTH_ACK_NOT_RCD;
+                        lim_increase_fils_sequence_number(session_entry);
 			limSendAuthMgmtFrame(mac_ctx,
 					&auth_frame,
 					mac_ctx->lim.gpLimMlmAuthReq->peerMacAddr,

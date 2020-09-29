@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2016 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2011-2018 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -4068,6 +4068,7 @@ enum htt_t2h_msg_type {
     HTT_T2H_MSG_TYPE_FLOW_POOL_MAP            = 0x18,
     HTT_T2H_MSG_TYPE_FLOW_POOL_UNMAP          = 0x19,
     HTT_T2H_MSG_TYPE_SRING_SETUP_DONE         = 0x1a,
+    HTT_T2H_MSG_TYPE_MONITOR_MAC_HEADER_IND   = 0x20,
 
     HTT_T2H_MSG_TYPE_TEST,
     /* keep this last */
@@ -4487,7 +4488,8 @@ PREPACK struct htt_rx_ind_hdr_suffix_t
 {
     A_UINT32 /* word 0 */
         fw_rx_desc_bytes: 16,
-        reserved0: 16;
+        noise_floor_chain0: 8,
+        noise_floor_chain1: 8;
 } POSTPACK;
 
 #define HTT_RX_IND_HDR_SUFFIX_BYTES (sizeof(struct htt_rx_ind_hdr_suffix_t))
@@ -4593,7 +4595,7 @@ A_COMPILE_TIME_ASSERT(HTT_RX_IND_hdr_size_quantum,
  * |--------------------------------------------------------------------------|
  * |    service     |                    HT-SIG / VHT-SIG-A2                  |
  * |==========================================================================|
- * |             reserved               |          FW rx desc bytes           |
+ * |     chain1 NF  |   chain0 NF       |          FW rx desc bytes           |
  * |--------------------------------------------------------------------------|
  * |     MSDU Rx    |      MSDU Rx      |        MSDU Rx      |    MSDU Rx    |
  * |     desc B3    |      desc B2      |        desc B1      |    desc B0    |
@@ -4896,6 +4898,12 @@ A_COMPILE_TIME_ASSERT(HTT_RX_IND_hdr_size_quantum,
  *     Bits 15:0
  *     Purpose: Indicate how many bytes in the Rx indication are used for
  *         FW Rx descriptors
+ *   - chain0 noise floor
+ *     Bits 23:16
+ *     Purpose: Indicate chain0 noise floor to host
+ *   - chain1 noise floor
+ *     Bits 31:24
+ *     Purpose: Indicate chain1 noise floor to host
  *
  * Payload fields:
  *   - MPDU_COUNT
@@ -4974,6 +4982,11 @@ A_COMPILE_TIME_ASSERT(HTT_RX_IND_hdr_size_quantum,
 #define HTT_RX_IND_FW_RX_DESC_BYTES_M   0xffff
 #define HTT_RX_IND_FW_RX_DESC_BYTES_S   0
 
+#define HTT_RX_IND_NOISE_FLOOR_CHAIN0_M   0x00ff0000
+#define HTT_RX_IND_NOISE_FLOOR_CHAIN0_S   16
+#define HTT_RX_IND_NOISE_FLOOR_CHAIN1_M   0xff000000
+#define HTT_RX_IND_NOISE_FLOOR_CHAIN1_S   24
+
 /* payload fields */
 #define HTT_RX_IND_MPDU_COUNT_M    0xff
 #define HTT_RX_IND_MPDU_COUNT_S    0
@@ -5021,6 +5034,11 @@ A_COMPILE_TIME_ASSERT(HTT_RX_IND_hdr_size_quantum,
     } while (0)
 #define HTT_RX_IND_FW_RX_DESC_BYTES_GET(word) \
     (((word) & HTT_RX_IND_FW_RX_DESC_BYTES_M) >> HTT_RX_IND_FW_RX_DESC_BYTES_S)
+
+#define HTT_RX_IND_NOISE_FLOOR_CHAIN0_GET(word) \
+    (((word) & HTT_RX_IND_NOISE_FLOOR_CHAIN0_M) >> HTT_RX_IND_NOISE_FLOOR_CHAIN0_S)
+#define HTT_RX_IND_NOISE_FLOOR_CHAIN1_GET(word) \
+    (((word) & HTT_RX_IND_NOISE_FLOOR_CHAIN1_M) >> HTT_RX_IND_NOISE_FLOOR_CHAIN1_S)
 
 
 #define HTT_RX_IND_FLUSH_SEQ_NUM_START_SET(word, value)              \
@@ -6220,15 +6238,19 @@ PREPACK struct htt_txq_group {
  * The following diagram shows the format of the TX completion indication sent
  * from the target to the host
  *
- *          |31      25|    24|23        16| 15 |14 11|10   8|7          0|
+ *          |31      27|26|25|24|23     16| 15 |14 11|10    8|7          0|
  *          |-------------------------------------------------------------|
- * header:  | reserved |append|     num    | t_i| tid |status|  msg_type  |
+ * header:  | reserved |a2|a1|a0|   num   | t_i| tid |status |  msg_type  |
  *          |-------------------------------------------------------------|
  * payload: |            MSDU1 ID          |         MSDU0 ID             |
  *          |-------------------------------------------------------------|
  *          :            MSDU3 ID          :         MSDU2 ID             :
  *          |-------------------------------------------------------------|
  *          |          struct htt_tx_compl_ind_append_retries             |
+ *          |-------------------------------------------------------------|
+ *          |          struct htt_tx_compl_ind_append_txtstamp            |
+ *          |-------------------------------------------------------------|
+ *          |          struct htt_tx_compl_ind_append_txpower             |
  *          - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
  *
  * The following field definitions describe the format of the TX completion
@@ -6255,10 +6277,21 @@ PREPACK struct htt_txq_group {
  *   Bits 23:16
  *   Purpose: the number of payload in this indication
  *   Value: 1 to 255
- * - append
+ * - a0 - append0
  *   Bits 24:24
  *   Purpose: append the struct htt_tx_compl_ind_append_retries which contains
- *            the number of tx retries for one MSDU at the end of this message
+ *            the number of tx retries for one MSDU after MSDU ID.
+ *   Value: 0 indicates no appending; 1 indicates appending
+ * - a1 - append1
+ *   Bits 25:25
+ *   Purpose: append the struct htt_tx_compl_ind_append_txtstamp which contains
+ *            the timestamp info for each TX msdu id in payload after append0.
+ *   Value: 0 indicates no appending; 1 indicates appending
+ * - a2 - append2
+ *   Bits 26:26
+ *   Purpose: append the struct htt_tx_compl_ind_append_txpower which contains
+ *            one or more tx power of each MSDUs after append1.
+ *            The start of tx power(s) must be 4-bytes-word aligned.
  *   Value: 0 indicates no appending; 1 indicates appending
  * Payload fields:
  * - hmsdu_id
@@ -6277,6 +6310,10 @@ PREPACK struct htt_txq_group {
 #define HTT_TX_COMPL_IND_NUM_M         0x00ff0000
 #define HTT_TX_COMPL_IND_APPEND_S      24
 #define HTT_TX_COMPL_IND_APPEND_M      0x01000000
+#define HTT_TX_COMPL_IND_APPEND1_S     25
+#define HTT_TX_COMPL_IND_APPEND1_M     0x02000000
+#define HTT_TX_COMPL_IND_APPEND2_S     26
+#define HTT_TX_COMPL_IND_APPEND2_M     0x04000000
 
 #define HTT_TX_COMPL_IND_STATUS_SET(_info, _val)                        \
     do {                                                                \
@@ -6314,6 +6351,20 @@ PREPACK struct htt_txq_group {
     } while (0)
 #define HTT_TX_COMPL_IND_APPEND_GET(_info)                             \
     (((_info) & HTT_TX_COMPL_IND_APPEND_M) >> HTT_TX_COMPL_IND_APPEND_S)
+#define HTT_TX_COMPL_IND_APPEND1_SET(_info, _val)                           \
+    do {                                                            \
+        HTT_CHECK_SET_VAL(HTT_TX_COMPL_IND_APPEND1, _val);          \
+        ((_info) |= ((_val) << HTT_TX_COMPL_IND_APPEND1_S));        \
+    } while (0)
+#define HTT_TX_COMPL_IND_APPEND1_GET(_info)                             \
+    (((_info) & HTT_TX_COMPL_IND_APPEND1_M) >> HTT_TX_COMPL_IND_APPEND1_S)
+#define HTT_TX_COMPL_IND_APPEND2_SET(_info, _val)                        \
+    do {                                                           \
+        HTT_CHECK_SET_VAL(HTT_TX_COMPL_IND_APPEND2, _val);           \
+        ((_info) |= ((_val) << HTT_TX_COMPL_IND_APPEND2_S));         \
+    } while (0)
+#define HTT_TX_COMPL_IND_APPEND2_GET(_info)                              \
+    (((_info) & HTT_TX_COMPL_IND_APPEND2_M) >> HTT_TX_COMPL_IND_APPEND2_S)
 
 #define HTT_TX_COMPL_HEAD_SZ                4
 #define HTT_TX_COMPL_BYTES_PER_MSDU_ID      2
@@ -6335,6 +6386,10 @@ PREPACK struct htt_txq_group {
  */
 #define HTT_TX_COMPL_IND_STAT_PEER_DEL    4
 
+#if defined(CONFIG_HL_SUPPORT)
+/* The FAIL_NOTIFY status is used for regular frms in HL cases */
+#define HTT_TX_COMPL_IND_STAT_FAIL_NOTIFY   5
+#endif
 
 #define HTT_TX_COMPL_IND_APPEND_SET_MORE_RETRY(f)  ((f) |= 0x1)
 #define HTT_TX_COMPL_IND_APPEND_CLR_MORE_RETRY(f)  ((f) &= (~0x1))
@@ -6349,6 +6404,14 @@ PREPACK struct htt_tx_compl_ind_append_retries {
     A_UINT8  tx_retries;
     A_UINT8  flag; /* Bit 0, 1: another append_retries struct is appended
                              0: this is the last append_retries struct */
+} POSTPACK;
+
+PREPACK struct htt_tx_compl_ind_append_txtstamp {
+    A_UINT32 timestamp[1/*or more*/];
+} POSTPACK;
+
+PREPACK struct htt_tx_compl_ind_append_txpower {
+    A_UINT16 tx_power[1/*or more*/];
 } POSTPACK;
 
 /**
@@ -8125,5 +8188,77 @@ enum htt_ring_setup_status {
         HTT_CHECK_SET_VAL(HTT_SRING_SETUP_DONE_STATUS, _val); \
         ((_var) |= ((_val) << HTT_SRING_SETUP_DONE_STATUS_S)); \
     } while (0)
+
+/**
+ * @brief target -> host monitor mac header indication message
+ *
+ * @details
+ * The following diagram shows the format of the monitor mac header message
+ * sent from the target to the host, while enable rx filter promiscuous.
+ *
+ *          |31          24|23           16|15            8|7            0|
+ *          |-------------------------------------------------------------|
+ *          |            peer_id           |    reserved0  |    msg_type  |
+ *          |-------------------------------------------------------------|
+ *          |            reserved1         |           num_mpdu           |
+ *          |-------------------------------------------------------------|
+ *          |                       struct hw_rx_desc                     |
+ *          |                      (see wal_rx_desc.h)                    |
+ *          |-------------------------------------------------------------|
+ *          |                   struct ieee80211_frame_addr4              |
+ *          |                      (see ieee80211_defs.h)                 |
+ *          |                            ......                           |
+ *          |-------------------------------------------------------------|
+ *
+ * Header fields:
+ *  - msg_type
+ *    Bits 7:0
+ *    Purpose: Identifies this is a monitor mac header indication
+ *             message.
+ *    Value: 0x20
+ *   - reserved0
+ *     Bits 15:8
+ *     Purpose:
+ *     value:
+ *  - peer_id
+ *    Bits 31:16
+ *    Purpose: Software peer id given by host during association,
+               in this case it should be set to invalid(0xFF)
+ *    Value:
+ *  - num_mpdu
+ *    Bits 15:0
+ *    Purpose: numbers of mpdu mac header (struct ieee80211_frame_addr4) per rx ppdu
+ *             the maximum num_mpdu is limited to 32.
+ *    Value:
+ *   - reserved1
+ *     Bits 31:16
+ *     Purpose:
+ *     value:
+ */
+#define HTT_T2H_MONITOR_MAC_HEADER_IND_HDR_SIZE       8
+
+#define HTT_T2H_MONITOR_MAC_HEADER_PEER_ID_M          0xFFFF0000
+#define HTT_T2H_MONITOR_MAC_HEADER_PEER_ID_S          16
+
+#define HTT_T2H_MONITOR_MAC_HEADER_NUM_MPDU_M         0x0000FFFF
+#define HTT_T2H_MONITOR_MAC_HEADER_NUM_MPDU_S         0
+
+#define HTT_T2H_MONITOR_MAC_HEADER_PEER_ID_SET(word, value)             \
+    do {                                                         \
+        HTT_CHECK_SET_VAL(HTT_T2H_MONITOR_MAC_HEADER_PEER_ID, value);   \
+        (word) |= (value)  << HTT_T2H_MONITOR_MAC_HEADER_PEER_ID_S;     \
+    } while (0)
+#define HTT_T2H_MONITOR_MAC_HEADER_PEER_ID_GET(word) \
+    (((word) & HTT_T2H_MONITOR_MAC_HEADER_PEER_ID_M) >> \
+    HTT_T2H_MONITOR_MAC_HEADER_PEER_ID_S)
+
+#define HTT_T2H_MONITOR_MAC_HEADER_NUM_MPDU_SET(word, value)             \
+    do {                                                         \
+        HTT_CHECK_SET_VAL(HTT_T2H_MONITOR_MAC_HEADER_NUM_MPDU, value);   \
+        (word) |= (value)  << HTT_T2H_MONITOR_MAC_HEADER_NUM_MPDU_S;     \
+    } while (0)
+#define HTT_T2H_MONITOR_MAC_HEADER_NUM_MPDU_GET(word) \
+    (((word) & HTT_T2H_MONITOR_MAC_HEADER_NUM_MPDU_M) >> \
+    HTT_T2H_MONITOR_MAC_HEADER_NUM_MPDU_S)
 
 #endif

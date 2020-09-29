@@ -684,7 +684,6 @@ typedef struct{
 #endif
 
 #ifdef CONFIG_PANTECH_PMIC_NONSTANDARD_CHARGER
-extern int get_udc_state(char *udc_state);
 static int smbchg_change_usb_supply_type(struct smbchg_chip *chip,
 						enum power_supply_type type);
 
@@ -696,14 +695,6 @@ enum nonstandard_state {
     NONSTANDARD_PENDING,
     NONSTANDARD_COMPLETED,
 };
-#endif
-
-#if defined(CONFIG_PANTECH_USB_BLOCKING_MDMSTATE)
-extern int get_pantech_mdm_state(void);
-#endif
-
-#ifdef CONFIG_PANTECH_PMIC_CHARGER_WIRELESS
-extern int set_otg_host_state(int mode);
 #endif
 
 static int smbchg_read(struct smbchg_chip *chip, u8 *val,
@@ -4175,15 +4166,9 @@ non_conforming_chg_check_work(struct work_struct *work)
 	
 	ext = chip->usb_psy;
 
-#if defined(CONFIG_PANTECH_USB_BLOCKING_MDMSTATE)
-	if(!chip->usb_present || 0 < get_pantech_mdm_state())
-		return;
-#else
 	if(!chip->usb_present)
-		return;
-#endif	
-	
-	rc = get_udc_state(udc_state);
+		return;	
+
 
 	if(rc<0){
 		pr_err("%s: Failed to get udc_state. rc=%d\n", __func__, rc);
@@ -5364,10 +5349,6 @@ static void charging_count_init(struct smbchg_chip* chip)
 }
 #endif
 
-#ifdef CONFIG_PANTECH_OTG_LOW_BATTERY
-extern int get_pantech_otg_enabled(void);
-extern void pantech_otg_uvlo_notify(int uvlo);
-#endif
 
 #define PMIC_HEARTBEAT_DELAY_NORMAL 30000	// 30s
 #define PMIC_HEARTBEAT_DELAY_SHORT 5000		// 5s
@@ -5407,12 +5388,6 @@ static void update_heartbeat_work(struct work_struct *work)
 		batt_fg_soc = 50;
 	}
 #endif	
-
-#ifdef CONFIG_PANTECH_OTG_LOW_BATTERY
-	if((batt_soc < 10) && get_pantech_otg_enabled()) {
-		pantech_otg_uvlo_notify(1);
-	}
-#endif
 
 #ifdef CONFIG_PANTECH_PMIC_CHARGING_COUNT
 	if(chip->charging_count_reset || chip->charging_count_once_read)
@@ -7231,7 +7206,7 @@ static irqreturn_t dcin_uv_handler(int irq, void *_chip)
 	else if(chip->dc_present && usbin_chg_disable_status && otg_present){
 		//pr_err("OTG disable delay workque set\n");
 		//Send OTG disable event
-		set_otg_host_state(2);
+		//set_otg_host_state(2);
 		otg_disable_stat_check = true;
 		pr_info("otg_disable_stat_check %d\n", otg_disable_stat_check);
 		power_supply_set_usb_otg(chip->usb_psy, 0);
@@ -7553,7 +7528,7 @@ static irqreturn_t usbid_change_handler(int irq, void *_chip)
 	{
 		pr_err("Block OTG by OTG insertion during wireless\n");
 		//set_otg_host_state(2);
-		set_otg_host_state(3);
+		//set_otg_host_state(3);
 		otg_disable_stat_check = true;
 	}
 		else if (!wireless_chg_disable_status && !otg_present) {

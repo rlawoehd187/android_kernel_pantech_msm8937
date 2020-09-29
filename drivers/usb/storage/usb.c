@@ -480,7 +480,7 @@ void usb_stor_adjust_quirks(struct usb_device *udev, unsigned long *fflags)
 			US_FL_NO_READ_DISC_INFO | US_FL_NO_READ_CAPACITY_16 |
 			US_FL_INITIAL_READ10 | US_FL_WRITE_CACHE |
 			US_FL_NO_ATA_1X | US_FL_NO_REPORT_OPCODES |
-			US_FL_MAX_SECTORS_240);
+			US_FL_MAX_SECTORS_240 | US_FL_NO_REPORT_LUNS);
 
 	p = quirks;
 	while (*p) {
@@ -529,6 +529,9 @@ void usb_stor_adjust_quirks(struct usb_device *udev, unsigned long *fflags)
 			break;
 		case 'i':
 			f |= US_FL_IGNORE_DEVICE;
+			break;
+		case 'j':
+			f |= US_FL_NO_REPORT_LUNS;
 			break;
 		case 'l':
 			f |= US_FL_NOT_LOCKABLE;
@@ -798,9 +801,6 @@ static int usb_stor_acquire_resources(struct us_data *us)
 }
 
 /* Release all our dynamic resources */
-#if defined(CONFIG_ANDROID_PANTECH_USB_OTG_INTENT)
-extern void pantech_us_data_complete(void);
-#endif
 static void usb_stor_release_resources(struct us_data *us)
 {
 	/* Tell the control thread to exit.  The SCSI host must
@@ -809,11 +809,6 @@ static void usb_stor_release_resources(struct us_data *us)
 	 */
 	usb_stor_dbg(us, "-- sending exit command to thread\n");
 	complete(&us->cmnd_ready);
-#if defined(CONFIG_ANDROID_PANTECH_USB_OTG_INTENT)
-	if(!strncmp(us->scsi_name, "usb-storage", strlen("usb-storage"))){
-		pantech_us_data_complete();
-	}
-#endif
 	if (us->ctl_thread)
 		kthread_stop(us->ctl_thread);
 

@@ -57,11 +57,25 @@ extern int fixup_exception(struct pt_regs *regs);
  */
 static inline unsigned int uaccess_save_and_enable(void)
 {
+#ifdef CONFIG_CPU_SW_DOMAIN_PAN
+	unsigned int old_domain = get_domain();
+
+	/* Set the current domain access to permit user accesses */
+	set_domain((old_domain & ~domain_mask(DOMAIN_USER)) |
+		   domain_val(DOMAIN_USER, DOMAIN_CLIENT));
+
+	return old_domain;
+#else
 	return 0;
+#endif
 }
 
 static inline void uaccess_restore(unsigned int flags)
 {
+#ifdef CONFIG_CPU_SW_DOMAIN_PAN
+	/* Restore the user access mask */
+	set_domain(flags);
+#endif
 }
 
 /*
@@ -237,7 +251,7 @@ extern int __put_user_8(void *, unsigned long long);
 	({								\
 		unsigned long __limit = current_thread_info()->addr_limit - 1; \
 		const typeof(*(p)) __user *__tmp_p = (p);		\
-		register const typeof(*(p)) __r2 asm("r2") = (x);	\
+		register typeof(*(p)) __r2 asm("r2") = (x);	\
 		register const typeof(*(p)) __user *__p asm("r0") = __tmp_p; \
 		register unsigned long __l asm("r1") = __limit;		\
 		register int __e asm("r0");				\

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2016 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2016, 2018 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -235,9 +235,10 @@ typedef struct _VosSchedContext
    /* Free message queue for Tlshim Rx processing */
    struct list_head VosTlshimPktFreeQ;
 
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(4,10,0))
    /* cpu hotplug notifier */
    struct notifier_block *cpuHotPlugNotifier;
-
+#endif
    /* affinity lock */
    vos_lock_t affinity_lock;
 
@@ -389,6 +390,7 @@ typedef struct _VosContextType
    volatile v_U8_t    isLoadUnloadInProgress;
    volatile v_U8_t    is_load_in_progress;
    volatile v_U8_t    is_unload_in_progress;
+   volatile v_U8_t    is_ssr_failed;
 
    /* SSR re-init in progress */
    volatile v_U8_t     isReInitInProgress;
@@ -415,6 +417,7 @@ typedef struct _VosContextType
    struct list_head wdthread_timer_work_list;
    struct work_struct wdthread_work;
    spinlock_t wdthread_work_lock;
+   bool is_closed;
 } VosContextType, *pVosContextType;
 
 
@@ -658,6 +661,7 @@ int vos_get_gfp_flags(void);
 void vos_wd_reset_thread_stuck_count(int thread_id);
 bool vos_is_wd_thread(int thread_id);
 int vos_sched_is_mc_thread(int thread_id);
+void vos_thread_stuck_timer_init(pVosWatchdogContext wd_ctx);
 
 #define vos_wait_for_work_thread_completion(func) vos_is_ssr_ready(func)
 

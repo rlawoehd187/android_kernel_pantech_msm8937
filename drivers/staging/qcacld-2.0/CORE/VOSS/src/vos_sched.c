@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2016 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2018 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -348,6 +348,7 @@ int vos_sched_handle_throughput_req(bool high_tput_required)
 	return 0;
 }
 
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(4,10,0))
 /**
  * __vos_cpu_hotplug_notify - cpu core on-off notification handler
  * @block:	notifier block
@@ -463,7 +464,8 @@ static int vos_cpu_hotplug_notify(struct notifier_block *block,
 static struct notifier_block vos_cpu_hotplug_notifier = {
    .notifier_call = vos_cpu_hotplug_notify,
 };
-#endif
+#endif //LINUX_VERSION_CODE < KERNEL_VERSION(4,10,0)
+#endif //#ifdef QCA_CONFIG_SMP
 
 /*---------------------------------------------------------------------------
  * External Function implementation
@@ -501,6 +503,9 @@ vos_sched_open
 )
 {
   VOS_STATUS  vStatus = VOS_STATUS_SUCCESS;
+#ifdef CONFIG_PERF_NON_QC_PLATFORM
+  struct sched_param param = {.sched_priority = 99};
+#endif
 /*-------------------------------------------------------------------------*/
   VOS_TRACE(VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_INFO_HIGH,
              "%s: Opening the VOSS Scheduler",__func__);
@@ -556,8 +561,10 @@ vos_sched_open
        return VOS_STATUS_E_FAILURE;
   }
   spin_unlock_bh(&pSchedContext->VosTlshimPktFreeQLock);
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(4,10,0))
   register_hotcpu_notifier(&vos_cpu_hotplug_notifier);
   pSchedContext->cpuHotPlugNotifier = &vos_cpu_hotplug_notifier;
+#endif
   vos_lock_init(&pSchedContext->affinity_lock);
   pSchedContext->high_throughput_required = false;
 #endif
@@ -589,6 +596,9 @@ vos_sched_open
   pSchedContext->TlshimRxThread = kthread_create(VosTlshimRxThread,
                                                  pSchedContext,
                                                  "VosTlshimRxThread");
+#ifdef CONFIG_PERF_NON_QC_PLATFORM
+  sched_setscheduler(pSchedContext->TlshimRxThread, SCHED_FIFO, &param);
+#endif
   if (IS_ERR(pSchedContext->TlshimRxThread))
   {
 
@@ -637,7 +647,9 @@ MC_THREAD_START_FAILURE:
 
 
 #ifdef QCA_CONFIG_SMP
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(4,10,0))
   unregister_hotcpu_notifier(&vos_cpu_hotplug_notifier);
+#endif
   vos_free_tlshim_pkt_freeq(gpVosSchedContext);
 #endif
 
@@ -670,6 +682,7 @@ VOS_STATUS vos_watchdog_open
   vos_mem_zero(pWdContext, sizeof(VosWatchdogContext));
   pWdContext->pVContext = pVosContext;
   gpVosWatchdogContext = pWdContext;
+  pWdContext->thread_stuck_timer.state = VOS_TIMER_STATE_UNUSED;
 
   //Initialize the helper events and event queues
   init_completion(&pWdContext->WdStartEvent);
@@ -1004,18 +1017,17 @@ static void vos_wd_detect_thread_stuck(void)
 			flags);
 	}
 
-	if (!gpVosWatchdogContext->mc_thread_stuck_count) {
-		spin_unlock_irqrestore(&gpVosWatchdogContext->thread_stuck_lock,
-				flags);
-		vos_probe_threads();
-		spin_lock_irqsave(&gpVosWatchdogContext->thread_stuck_lock,
-				flags);
-	}
-
 	/* Increment the thread stuck count for all threads */
 	gpVosWatchdogContext->mc_thread_stuck_count++;
 
-	spin_unlock_irqrestore(&gpVosWatchdogContext->thread_stuck_lock, flags);
+	if (gpVosWatchdogContext->mc_thread_stuck_count <=
+				THREAD_STUCK_THRESHOLD) {
+		spin_unlock_irqrestore(&gpVosWatchdogContext->thread_stuck_lock,
+				flags);
+		vos_probe_threads();
+	} else
+		spin_unlock_irqrestore(&gpVosWatchdogContext->thread_stuck_lock,
+				flags);
 
 	/* Restart the timer */
 	if (VOS_STATUS_SUCCESS !=
@@ -1043,6 +1055,30 @@ static void vos_wd_detect_thread_stuck_cb(void *priv)
 		set_bit(WD_POST_EVENT, &gpVosWatchdogContext->wdEventFlag);
 		wake_up_interruptible(&gpVosWatchdogContext->wdWaitQueue);
 	}
+}
+
+ /**
+ * vos_thread_stuck_timer_init - Initialize thread stuck timer
+ *
+ * @wd_ctx: watchdog context.
+ *
+ * Return: void
+ */
+void vos_thread_stuck_timer_init(pVosWatchdogContext wd_ctx)
+{
+    if (vos_timer_init(&wd_ctx->thread_stuck_timer,
+                       VOS_TIMER_TYPE_SW,
+                       vos_wd_detect_thread_stuck_cb, NULL))
+        hddLog(LOGE, FL("Unable to initialize thread stuck timer"));
+    else
+    {
+        if (VOS_STATUS_SUCCESS !=
+                 vos_timer_start(&wd_ctx->thread_stuck_timer,
+                                 THREAD_STUCK_TIMER_VAL))
+            hddLog(LOGE, FL("Unable to start thread stuck timer"));
+        else
+            hddLog(LOG1, FL("Successfully started thread stuck timer"));
+    }
 }
 
 /**
@@ -1085,7 +1121,7 @@ VosWDThread
   v_BOOL_t shutdown              = VOS_FALSE;
   int count                      = 0;
   VOS_STATUS vosStatus = VOS_STATUS_SUCCESS;
-  set_user_nice(current, -3);
+  set_user_nice(current, -4);
 
   if (Arg == NULL)
   {
@@ -1097,22 +1133,6 @@ VosWDThread
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(3,8,0))
   daemonize("WD_Thread");
 #endif
-  /* Initialize the timer to detect thread stuck issues */
-  if (vos_timer_init(&gpVosWatchdogContext->thread_stuck_timer,
-        VOS_TIMER_TYPE_SW, vos_wd_detect_thread_stuck_cb, NULL)) {
-      VOS_TRACE(VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_ERROR,
-                "Unable to initialize thread stuck timer");
-  } else {
-      if (VOS_STATUS_SUCCESS !=
-              vos_timer_start(&gpVosWatchdogContext->thread_stuck_timer,
-                           THREAD_STUCK_TIMER_VAL))
-          VOS_TRACE(VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_ERROR,
-                        "Unable to start thread stuck timer");
-      else
-          VOS_TRACE(VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_INFO,
-                        "Successfully started thread stuck timer");
-  }
-
   /*
   ** Ack back to the context from which the Watchdog thread has been
   ** created.
@@ -1139,7 +1159,8 @@ VosWDThread
       if (test_and_clear_bit(WD_WLAN_DETECT_THREAD_STUCK,
                                    &pWdContext->wdEventFlag)) {
 
-       if (!test_bit(MC_SUSPEND_EVENT, &gpVosSchedContext->mcEventFlag))
+       if (gpVosSchedContext &&
+           !test_bit(MC_SUSPEND_EVENT, &gpVosSchedContext->mcEventFlag))
             vos_wd_detect_thread_stuck();
        else
             VOS_TRACE(VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_INFO,
@@ -1244,7 +1265,10 @@ VosWDThread
     } // while message loop processing
   } // while shutdown
 
-  vos_timer_destroy(&pWdContext->thread_stuck_timer);
+  /* destroy the timer only if intialized */
+  if (pWdContext->thread_stuck_timer.state != VOS_TIMER_STATE_UNUSED) {
+    vos_timer_destroy(&pWdContext->thread_stuck_timer);
+  }
   // If we get here the Watchdog thread must exit
   VOS_TRACE( VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_INFO,
       "%s: Watchdog Thread exiting !!!!", __func__);
@@ -1565,8 +1589,8 @@ VOS_STATUS vos_sched_close ( v_PVOID_t pVosContext )
     if (gpVosSchedContext == NULL)
     {
        VOS_TRACE(VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_ERROR,
-           "%s: gpVosSchedContext == NULL",__func__);
-       return VOS_STATUS_E_FAILURE;
+           "%s: gpVosSchedContext == NULL, already closed", __func__);
+       return VOS_STATUS_SUCCESS;
     }
 
     // shut down MC Thread
@@ -1593,7 +1617,10 @@ VOS_STATUS vos_sched_close ( v_PVOID_t pVosContext )
     gpVosSchedContext->TlshimRxThread = NULL;
     vos_drop_rxpkt_by_staid(gpVosSchedContext, WLAN_MAX_STA_COUNT);
     vos_free_tlshim_pkt_freeq(gpVosSchedContext);
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(4,10,0))
     unregister_hotcpu_notifier(&vos_cpu_hotplug_notifier);
+#endif
+    gpVosSchedContext = NULL;
 #endif
     return VOS_STATUS_SUCCESS;
 } /* vox_sched_close() */

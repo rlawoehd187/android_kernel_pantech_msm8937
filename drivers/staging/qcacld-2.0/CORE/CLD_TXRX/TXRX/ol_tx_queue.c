@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2016 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2017 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -109,6 +109,9 @@ ol_tx_queue_vdev_flush(struct ol_txrx_pdev_t *pdev, struct ol_txrx_vdev_t *vdev)
 
     /* flush bundling queue */
     ol_tx_hl_queue_flush_all(vdev);
+
+    /* flush del_ack queue */
+    ol_tx_hl_del_ack_queue_flush_all(vdev);
 
     /* flush VDEV TX queues */
     for (i = 0; i < OL_TX_VDEV_NUM_QUEUES; i++) {
@@ -1163,7 +1166,7 @@ ol_txrx_vdev_flush(ol_txrx_vdev_handle vdev)
             adf_nbuf_set_next(vdev->ll_pause.txq.head, NULL);
             adf_nbuf_unmap(vdev->pdev->osdev, vdev->ll_pause.txq.head,
                            ADF_OS_DMA_TO_DEVICE);
-            adf_nbuf_tx_free(vdev->ll_pause.txq.head, 1 /* error */);
+            adf_nbuf_tx_free(vdev->ll_pause.txq.head, ADF_NBUF_PKT_ERROR);
             vdev->ll_pause.txq.head = next;
         }
         vdev->ll_pause.txq.tail = NULL;
@@ -1379,7 +1382,7 @@ ol_tx_queue_log_entry_type_info(
             struct ol_tx_log_queue_state_var_sz_t *record;
 
             align_pad =
-                (*align - ((((u_int32_t) type) + 1))) & (*align - 1);
+               (*align - (uint32_t)(((unsigned long) type) + 1)) & (*align - 1);
             record = (struct ol_tx_log_queue_state_var_sz_t *)
                 (type + 1 + align_pad);
             *size += record->num_cats_active *
@@ -1683,6 +1686,9 @@ ol_tx_queue_log_display(struct ol_txrx_pdev_t *pdev)
      * being changed while in use, but since this is just for debugging,
      * don't bother.
      */
+    VOS_TRACE(VOS_MODULE_ID_TXRX, VOS_TRACE_LEVEL_ERROR,
+        "Current target credit: %d",
+        adf_os_atomic_read(&pdev->target_tx_credit));
     VOS_TRACE(VOS_MODULE_ID_TXRX, VOS_TRACE_LEVEL_ERROR,
         "Tx queue log:");
     VOS_TRACE(VOS_MODULE_ID_TXRX, VOS_TRACE_LEVEL_ERROR,
