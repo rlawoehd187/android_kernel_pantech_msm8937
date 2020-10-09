@@ -25,9 +25,6 @@
 #include <linux/delay.h>
 #include <linux/pm.h>
 #include <linux/miscdevice.h>
-#ifdef CONFIG_PANTECH_ERR_CRASH_LOGGING
-#include <mach/pantech_apanic.h>
-#endif
 
 #define EC05E_TERMINAL_A_DEV_NAME "terminal_a"
 #define EC05E_TERMINAL_B_DEV_NAME "terminal_b"
@@ -157,15 +154,7 @@ static void gpio_wheel_alps_ec05e_report_event(struct input_dev *input)
         }
         input_event(input, type, code, value);
         input_sync(input);
-    }
-    
-#ifdef CONFIG_PANTECH_ERR_CRASH_LOGGING
-    if (direction == EC05E_CW_DIRECTION) {
-        pantech_force_dump_key(KEY_VOLUMEDOWN, 1); 
-    } else if (direction == EC05E_CCW_DIRECTION) {
-        pantech_force_dump_key(KEY_VOLUMEUP, 1); 
-    }
-#endif					
+    }				
 }
 
 static void gpio_wheel_alps_ec05e_work_func(struct work_struct *work)

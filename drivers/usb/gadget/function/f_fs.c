@@ -39,10 +39,6 @@
 
 #define FUNCTIONFS_MAGIC	0xa647361 /* Chosen by a honest dice roll ;) */
 
-#ifdef CONFIG_ANDROID_PANTECH_USB_MANAGER
-#include "../f_pantech_android.h"
-#endif
-
 /* Reference counter handling */
 static void ffs_data_get(struct ffs_data *ffs);
 static void ffs_data_put(struct ffs_data *ffs);
@@ -3063,9 +3059,6 @@ static int ffs_func_set_alt(struct usb_function *f,
 		usb_gadget_autopm_get_async(ffs->gadget);
 	}
 
-#ifdef CONFIG_ANDROID_PANTECH_USB_MANAGER
-	usb_interface_enum_cb(ADB_TYPE_FLAG);
-#endif
 	return ret;
 }
 

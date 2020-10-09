@@ -1265,9 +1265,9 @@ static void qpnp_flash_led_work(struct work_struct *work)
 		goto turn_off;
     
 #ifdef CONFIG_PANTECH_CAMERA//for EF71 flash open-fault workaround
-    batt_temp = get_batt_temp_fg();
+    //batt_temp = get_batt_temp_fg();
     //batt_soc = get_batt_soc_fg();
-    batt_voltage = get_batt_voltage_fg();
+    //batt_voltage = get_batt_voltage_fg();
 /*
 get_batt_temp_fg() : check the current battery temperature (flash will be not operate when less than 0 degrees)
 get_batt_soc_fg() : check the current battery level

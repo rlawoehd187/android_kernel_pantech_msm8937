@@ -23,10 +23,6 @@
 #include <linux/usb/msm_hsusb.h>
 #include <asm/unaligned.h>
 
-#ifdef CONFIG_ANDROID_PANTECH_USB_MANAGER
-#include "f_pantech_android.h"
-#endif
-
 #include "u_os_desc.h"
 #define SSUSB_GADGET_VBUS_DRAW 900 /* in mA */
 #define SSUSB_GADGET_VBUS_DRAW_UNITS 8
