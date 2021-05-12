@@ -180,7 +180,8 @@ dtb-$(CONFIG_MACH_MSM8937_EF71S) += msm8937-ef71ie-tp10.dtb \
 else ifeq ($(CONFIG_BOARD_VER),$(CONFIG_TP20))
 dtb-$(CONFIG_MACH_MSM8937_EF71S) += msm8937-ef71ie-tp20.dtb \
 	msm8937-ef71s-tp20.dtb \
-	msm8937-ef71k-tp20.dtb
+	msm8937-ef71k-tp20.dtb \
+        msm8937-ef71g-tp20.dtb
 else
 dtb-$(CONFIG_MACH_MSM8937_EF71K) += msm8937-ef71ie-pp10.dtb \
 	msm8937-ef71s-pp10.dtb\
@@ -210,7 +211,8 @@ dtb-$(CONFIG_MACH_MSM8937_EF71K) += msm8937-ef71ie-tp10.dtb \
 else ifeq ($(CONFIG_BOARD_VER),$(CONFIG_TP20))
 dtb-$(CONFIG_MACH_MSM8937_EF71K) += msm8937-ef71ie-tp20.dtb \
 	msm8937-ef71s-tp20.dtb \
-	msm8937-ef71k-tp20.dtb
+	msm8937-ef71k-tp20.dtb \
+        msm8937-ef71g-tp20.dtb
 else
 dtb-$(CONFIG_MACH_MSM8937_EF71K) += msm8937-ef71ie-pp10.dtb \
 	msm8937-ef71s-pp10.dtb\
@@ -240,7 +242,8 @@ dtb-$(CONFIG_MACH_MSM8937_EF71IE) += msm8937-ef71ie-tp10.dtb \
 else ifeq ($(CONFIG_BOARD_VER),$(CONFIG_TP20))
 dtb-$(CONFIG_MACH_MSM8937_EF71IE) += msm8937-ef71ie-tp20.dtb \
 	msm8937-ef71s-tp20.dtb \
-	msm8937-ef71k-tp20.dtb
+	msm8937-ef71k-tp20.dtb \
+        msm8937-ef71g-tp20.dtb
 else
 dtb-$(CONFIG_MACH_MSM8937_EF71IE) += msm8937-ef71ie-pp10.dtb \
 	msm8937-ef71s-pp10.dtb\
