@@ -80,7 +80,13 @@
 };
 
 &pmi_haptic{
-	status = "ok";
+	status = "okay";
+	qcom,actuator-type = "lra";
+	qcom,wave-play-rate-us = <5500>;
+	qcom,wave-shape = "sine";
+	qcom,play-mode = "direct";
+	qcom,vmax-mv = <1700>;
+	qcom,brake-pattern = [00 01 00 00];
 };
 
 &spi_3 { /* BLSP1 QUP3 */
