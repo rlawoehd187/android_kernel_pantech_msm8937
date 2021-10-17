@@ -38,7 +38,7 @@
 #include <linux/of_batterydata.h>
 #include <linux/msm_bcl.h>
 #include <linux/ktime.h>
-#include "pmic-voter.h"
+#include "pmic-voter-ef71.h"
 #if defined(CONFIG_PANTECH_PMIC_CHARGER_AUTO_PWR_ON)
 #include <linux/sky_rawdata.h>
 #endif
