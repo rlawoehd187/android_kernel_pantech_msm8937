@@ -32,8 +32,7 @@ ifeq ($(CONFIG_CPU_IDLE),y)
 obj-$(CONFIG_SOC_IMX5) += cpuidle-imx5.o
 obj-$(CONFIG_SOC_IMX6Q) += cpuidle-imx6q.o
 obj-$(CONFIG_SOC_IMX6SL) += cpuidle-imx6sl.o
-# i.MX6SX reuses i.MX6Q cpuidle driver
-obj-$(CONFIG_SOC_IMX6SX) += cpuidle-imx6q.o
+obj-$(CONFIG_SOC_IMX6SX) += cpuidle-imx6sx.o
 endif
 
 ifdef CONFIG_SND_IMX_SOC
@@ -101,6 +100,10 @@ obj-$(CONFIG_SOC_IMX6SX) += clk-imx6sx.o mach-imx6sx.o
 ifeq ($(CONFIG_SUSPEND),y)
 AFLAGS_suspend-imx6.o :=-Wa,-march=armv7-a
 obj-$(CONFIG_SOC_IMX6) += suspend-imx6.o
+endif
+ifeq ($(CONFIG_ARM_CPU_SUSPEND),y)
+AFLAGS_resume-imx6.o :=-Wa,-march=armv7-a
+obj-$(CONFIG_SOC_IMX6) += resume-imx6.o
 endif
 obj-$(CONFIG_SOC_IMX6) += pm-imx6.o
 

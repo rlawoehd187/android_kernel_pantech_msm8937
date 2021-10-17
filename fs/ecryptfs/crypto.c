@@ -471,8 +471,6 @@ out:
 static void init_ecryption_parameters(bool *hw_crypt, bool *cipher_supported,
 				struct ecryptfs_crypt_stat *crypt_stat)
 {
-	unsigned char final[2*ECRYPTFS_MAX_CIPHER_NAME_SIZE+1];
-
 	if (!hw_crypt || !cipher_supported)
 		return;
 
@@ -481,9 +479,7 @@ static void init_ecryption_parameters(bool *hw_crypt, bool *cipher_supported,
 
 	if (get_events() && get_events()->is_cipher_supported_cb) {
 		*cipher_supported =
-			get_events()->is_cipher_supported_cb(
-				ecryptfs_get_full_cipher(crypt_stat->cipher,
-				crypt_stat->cipher_mode, final, sizeof(final)));
+			get_events()->is_cipher_supported_cb(crypt_stat);
 		if (*cipher_supported) {
 
 			/**
@@ -810,12 +806,8 @@ static void ecryptfs_generate_new_key(struct ecryptfs_crypt_stat *crypt_stat)
 static int ecryptfs_generate_new_salt(struct ecryptfs_crypt_stat *crypt_stat)
 {
 	size_t salt_size = 0;
-	unsigned char final[2*ECRYPTFS_MAX_CIPHER_NAME_SIZE+1];
 
-	salt_size = ecryptfs_get_salt_size_for_cipher(
-			ecryptfs_get_full_cipher(crypt_stat->cipher,
-						 crypt_stat->cipher_mode,
-						 final, sizeof(final)));
+	salt_size = ecryptfs_get_salt_size_for_cipher(crypt_stat);
 
 	if (0 == salt_size)
 		return 0;
@@ -1180,8 +1172,10 @@ int ecryptfs_read_and_validate_header_region(struct inode *inode)
 	lower_file->f_ra.ra_pages = ra_pages_org;
 	/* restore read a head mechanism */
 
-	if (rc < ECRYPTFS_SIZE_AND_MARKER_BYTES)
-		return rc >= 0 ? -EINVAL : rc;
+	if (rc < 0)
+		return rc;
+	else if (rc < ECRYPTFS_SIZE_AND_MARKER_BYTES)
+		return -EINVAL;
 	rc = ecryptfs_validate_marker(marker);
 	if (!rc)
 		ecryptfs_i_size_init(file_size, inode);
@@ -1539,8 +1533,10 @@ int ecryptfs_read_and_validate_xattr_region(struct dentry *dentry,
 	rc = ecryptfs_getxattr_lower(ecryptfs_dentry_to_lower(dentry),
 				     ECRYPTFS_XATTR_NAME, file_size,
 				     ECRYPTFS_SIZE_AND_MARKER_BYTES);
-	if (rc < ECRYPTFS_SIZE_AND_MARKER_BYTES)
-		return rc >= 0 ? -EINVAL : rc;
+	if (rc < 0)
+		return rc;
+	else if (rc < ECRYPTFS_SIZE_AND_MARKER_BYTES)
+		return -EINVAL;
 	rc = ecryptfs_validate_marker(marker);
 	if (!rc)
 		ecryptfs_i_size_init(file_size, inode);

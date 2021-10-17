@@ -193,7 +193,7 @@ again:
 		mutex_lock(&iommu_group_mutex);
 		ida_remove(&iommu_group_ida, group->id);
 		mutex_unlock(&iommu_group_mutex);
-		kfree(group);
+		kobject_put(&group->kobj);
 		return ERR_PTR(ret);
 	}
 
@@ -330,36 +330,30 @@ int iommu_group_add_device(struct iommu_group *group, struct device *dev)
 	device->dev = dev;
 
 	ret = sysfs_create_link(&dev->kobj, &group->kobj, "iommu_group");
-	if (ret) {
-		kfree(device);
-		return ret;
-	}
+	if (ret)
+		goto err_free_device;
 
 	device->name = kasprintf(GFP_KERNEL, "%s", kobject_name(&dev->kobj));
 rename:
 	if (!device->name) {
-		sysfs_remove_link(&dev->kobj, "iommu_group");
-		kfree(device);
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto err_remove_link;
 	}
 
 	ret = sysfs_create_link_nowarn(group->devices_kobj,
 				       &dev->kobj, device->name);
 	if (ret) {
-		kfree(device->name);
 		if (ret == -EEXIST && i >= 0) {
 			/*
 			 * Account for the slim chance of collision
 			 * and append an instance to the name.
 			 */
+			kfree(device->name);
 			device->name = kasprintf(GFP_KERNEL, "%s.%d",
 						 kobject_name(&dev->kobj), i++);
 			goto rename;
 		}
-
-		sysfs_remove_link(&dev->kobj, "iommu_group");
-		kfree(device);
-		return ret;
+		goto err_free_name;
 	}
 
 	kobject_get(group->devices_kobj);
@@ -376,6 +370,15 @@ rename:
 
 	trace_add_device_to_group(group->id, dev);
 	return 0;
+
+err_free_name:
+	kfree(device->name);
+err_remove_link:
+	sysfs_remove_link(&dev->kobj, "iommu_group");
+err_free_device:
+	kfree(device);
+	pr_err("Failed to add device %s to group %d: %d\n", dev_name(dev), group->id, ret);
+	return ret;
 }
 EXPORT_SYMBOL_GPL(iommu_group_add_device);
 
@@ -991,6 +994,8 @@ void iommu_domain_free(struct iommu_domain *domain)
 	if (likely(domain->ops->domain_destroy != NULL))
 		domain->ops->domain_destroy(domain);
 
+	iommu_debug_domain_remove(domain);
+
 	kfree(domain);
 }
 EXPORT_SYMBOL_GPL(iommu_domain_free);
@@ -1015,7 +1020,6 @@ void iommu_detach_device(struct iommu_domain *domain, struct device *dev)
 	if (unlikely(domain->ops->detach_dev == NULL))
 		return;
 
-	iommu_debug_detach_device(domain, dev);
 	domain->ops->detach_dev(domain, dev);
 	trace_detach_device_from_domain(dev);
 }
@@ -1078,6 +1082,13 @@ phys_addr_t iommu_iova_to_phys_hard(struct iommu_domain *domain,
 	return domain->ops->iova_to_phys_hard(domain, iova);
 }
 
+static unsigned long iommu_get_pgsize_bitmap(struct iommu_domain *domain)
+{
+	if (domain->ops->get_pgsize_bitmap)
+		return domain->ops->get_pgsize_bitmap(domain);
+	return domain->ops->pgsize_bitmap;
+}
+
 size_t iommu_pgsize(unsigned long pgsize_bitmap,
 		    unsigned long addr_merge, size_t size)
 {
@@ -1117,20 +1128,22 @@ size_t iommu_pgsize(unsigned long pgsize_bitmap,
 int iommu_map(struct iommu_domain *domain, unsigned long iova,
 	      phys_addr_t paddr, size_t size, int prot)
 {
-	unsigned long orig_iova = iova;
+	unsigned long orig_iova = iova, pgsize_bitmap;
 	unsigned int min_pagesz;
 	size_t orig_size = size;
 	int ret = 0;
 
 	trace_map_start(iova, paddr, size);
 	if (unlikely(domain->ops->map == NULL ||
-		     domain->ops->pgsize_bitmap == 0UL)) {
+		     (domain->ops->pgsize_bitmap == 0UL &&
+		      !domain->ops->get_pgsize_bitmap))) {
 		trace_map_end(iova, paddr, size);
 		return -ENODEV;
 	}
 
+	pgsize_bitmap = iommu_get_pgsize_bitmap(domain);
 	/* find out the minimum page size supported */
-	min_pagesz = 1 << __ffs(domain->ops->pgsize_bitmap);
+	min_pagesz = 1 << __ffs(pgsize_bitmap);
 
 	/*
 	 * both the virtual address and the physical one, as well as
@@ -1147,8 +1160,7 @@ int iommu_map(struct iommu_domain *domain, unsigned long iova,
 	pr_debug("map: iova 0x%lx pa %pa size 0x%zx\n", iova, &paddr, size);
 
 	while (size) {
-		size_t pgsize = iommu_pgsize(domain->ops->pgsize_bitmap,
-					     iova | paddr, size);
+		size_t pgsize = iommu_pgsize(pgsize_bitmap, iova | paddr, size);
 
 		pr_debug("mapping: iova 0x%lx pa %pa pgsize 0x%zx\n",
 			 iova, &paddr, pgsize);
@@ -1180,12 +1192,13 @@ size_t iommu_unmap(struct iommu_domain *domain, unsigned long iova, size_t size)
 
 	trace_unmap_start(iova, 0, size);
 	if (unlikely(domain->ops->unmap == NULL ||
-		     domain->ops->pgsize_bitmap == 0UL)) {
+		     (domain->ops->pgsize_bitmap == 0UL &&
+		      !domain->ops->get_pgsize_bitmap))) {
 		trace_unmap_end(iova, 0, size);
 		return -ENODEV;
 	}
 	/* find out the minimum page size supported */
-	min_pagesz = 1 << __ffs(domain->ops->pgsize_bitmap);
+	min_pagesz = 1 << __ffs(iommu_get_pgsize_bitmap(domain));
 
 	/*
 	 * The virtual address, as well as the size of the mapping, must be
@@ -1333,7 +1346,7 @@ int iommu_domain_get_attr(struct iommu_domain *domain,
 		break;
 	case DOMAIN_ATTR_PAGING:
 		paging  = data;
-		*paging = (domain->ops->pgsize_bitmap != 0UL);
+		*paging = (iommu_get_pgsize_bitmap(domain) != 0UL);
 		break;
 	case DOMAIN_ATTR_WINDOWS:
 		count = data;

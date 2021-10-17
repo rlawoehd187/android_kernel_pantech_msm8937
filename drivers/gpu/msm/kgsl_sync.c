@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2016, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2017, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -180,7 +180,7 @@ int kgsl_add_fence_event(struct kgsl_device *device,
 		goto out;
 	}
 	snprintf(fence_name, sizeof(fence_name),
-		"%s-pid-%d-ctx-%d-ts-%d",
+		"%s-pid-%d-ctx-%d-ts-%u",
 		device->name, current->group_leader->pid,
 		context_id, timestamp);
 
@@ -474,13 +474,12 @@ long kgsl_ioctl_syncsource_create(struct kgsl_device_private *dev_priv,
 		goto out;
 	}
 
-	kref_init(&syncsource->refcount); // CR988993, ANDROID-28305757
+	kref_init(&syncsource->refcount);
 	syncsource->private = private;
 
 	idr_preload(GFP_KERNEL);
 	spin_lock(&private->syncsource_lock);
 	id = idr_alloc(&private->syncsource_idr, syncsource, 1, 0, GFP_NOWAIT);
-
 	if (id > 0) {
 		syncsource->id = id;
 		param->id = id;
@@ -549,7 +548,7 @@ long kgsl_ioctl_syncsource_destroy(struct kgsl_device_private *dev_priv,
 {
 	struct kgsl_syncsource_destroy *param = data;
 	struct kgsl_syncsource *syncsource = NULL;
-	struct kgsl_process_private *private = dev_priv->process_priv;  // CR988993, ANDROID-28305757
+	struct kgsl_process_private *private = dev_priv->process_priv;
 
 	spin_lock(&private->syncsource_lock);
 	syncsource = idr_find(&private->syncsource_idr, param->id);

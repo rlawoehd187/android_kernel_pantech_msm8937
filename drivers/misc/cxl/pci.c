@@ -117,6 +117,7 @@ static DEFINE_PCI_DEVICE_TABLE(cxl_pci_tbl) = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_IBM, 0x0477), },
 	{ PCI_DEVICE(PCI_VENDOR_ID_IBM, 0x044b), },
 	{ PCI_DEVICE(PCI_VENDOR_ID_IBM, 0x04cf), },
+	{ PCI_DEVICE(PCI_VENDOR_ID_IBM, 0x0601), },
 	{ PCI_DEVICE_CLASS(0x120000, ~0), },
 
 	{ }
@@ -986,8 +987,6 @@ static int cxl_probe(struct pci_dev *dev, const struct pci_device_id *id)
 	struct cxl *adapter;
 	int slice;
 	int rc;
-
-	pci_dev_get(dev);
 
 	if (cxl_verbose)
 		dump_cxl_config_space(dev);

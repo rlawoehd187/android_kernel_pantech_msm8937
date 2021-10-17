@@ -33,7 +33,7 @@ static int hidp_sock_release(struct socket *sock)
 {
 	struct sock *sk = sock->sk;
 
-	BT_DBG("sock %p sk %p", sock, sk);
+	BT_DBG("sock %pK sk %pK", sock, sk);
 
 	if (!sk)
 		return 0;
@@ -76,6 +76,7 @@ static int hidp_sock_ioctl(struct socket *sock, unsigned int cmd, unsigned long 
 			sockfd_put(csock);
 			return err;
 		}
+		ca.name[sizeof(ca.name)-1] = 0;
 
 		err = hidp_connection_add(&ca, csock, isock);
 		if (!err && copy_to_user(argp, &ca, sizeof(ca)))
@@ -230,7 +231,7 @@ static int hidp_sock_create(struct net *net, struct socket *sock, int protocol,
 {
 	struct sock *sk;
 
-	BT_DBG("sock %p", sock);
+	BT_DBG("sock %pK", sock);
 
 	if (sock->type != SOCK_RAW)
 		return -ESOCKTNOSUPPORT;

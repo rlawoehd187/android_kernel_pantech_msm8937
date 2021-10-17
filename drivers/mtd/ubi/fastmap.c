@@ -450,7 +450,7 @@ static void unmap_peb(struct ubi_attach_info *ai, int pnum)
  * < 0 indicates an internal error.
  */
 static int scan_pool(struct ubi_device *ubi, struct ubi_attach_info *ai,
-		     int *pebs, int pool_size, unsigned long long *max_sqnum,
+		     __be32 *pebs, int pool_size, unsigned long long *max_sqnum,
 		     struct list_head *free)
 {
 	struct ubi_vid_hdr *vh;
@@ -513,10 +513,11 @@ static int scan_pool(struct ubi_device *ubi, struct ubi_attach_info *ai,
 			unsigned long long ec = be64_to_cpu(ech->ec);
 			unmap_peb(ai, pnum);
 			dbg_bld("Adding PEB to free: %i", pnum);
+
 			if (err == UBI_IO_FF_BITFLIPS)
-				add_aeb(ai, free, pnum, ec, 1);
-			else
-				add_aeb(ai, free, pnum, ec, 0);
+				scrub = 1;
+
+			add_aeb(ai, free, pnum, ec, scrub);
 			continue;
 		} else if (err == 0 || err == UBI_IO_BITFLIPS) {
 			dbg_bld("Found non empty PEB:%i in pool", pnum);
@@ -775,7 +776,7 @@ static int ubi_attach_fastmap(struct ubi_device *ubi,
 		for (j = 0; j < be32_to_cpu(fm_eba->reserved_pebs); j++) {
 			int pnum = be32_to_cpu(fm_eba->pnum[j]);
 
-			if ((int)be32_to_cpu(fm_eba->pnum[j]) < 0)
+			if (pnum < 0)
 				continue;
 
 			aeb = NULL;
@@ -1058,6 +1059,7 @@ int ubi_scan_fastmap(struct ubi_device *ubi, struct ubi_attach_info *ai,
 	ubi_msg(ubi, "fastmap WL pool size: %d",
 		ubi->fm_wl_pool.max_size);
 	ubi->fm_disabled = 0;
+	ubi->fast_attach = 1;
 
 	ubi_free_vid_hdr(ubi, vh);
 	kfree(ech);

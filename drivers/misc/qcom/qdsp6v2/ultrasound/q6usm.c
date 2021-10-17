@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2016, 2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -208,7 +208,7 @@ static int q6usm_us_client_buf_free(unsigned int dir,
 
 	rc = q6usm_memory_unmap(port->phys, dir, usc->session,
 				*((uint32_t *)port->ext));
-	pr_debug("%s: data[%p]phys[%llx][%p]\n", __func__,
+	pr_debug("%s: data[%pK]phys[%llx][%pK]\n", __func__,
 		 (void *)port->data, (u64)port->phys, (void *)&port->phys);
 
 	msm_audio_ion_free(port->client, port->handle);
@@ -248,7 +248,7 @@ int q6usm_us_param_buf_free(unsigned int dir,
 
 	rc = q6usm_memory_unmap(port->param_phys, dir, usc->session,
 				*((uint32_t *)port->param_buf_mem_handle));
-	pr_debug("%s: data[%p]phys[%llx][%p]\n", __func__,
+	pr_debug("%s: data[%pK]phys[%llx][%pK]\n", __func__,
 		 (void *)port->param_buf, (u64)port->param_phys,
 		 (void *)&port->param_phys);
 
@@ -362,7 +362,7 @@ struct us_client *q6usm_us_client_alloc(
 		spin_lock_init(&usc->port[lcnt].dsp_lock);
 		usc->port[lcnt].ext = (void *)p_mem_handle++;
 		usc->port[lcnt].param_buf_mem_handle = (void *)p_mem_handle++;
-		pr_err("%s: usc->port[%d].ext=%p;\n",
+		pr_err("%s: usc->port[%d].ext=%pK;\n",
 		       __func__, lcnt, usc->port[lcnt].ext);
 	}
 	atomic_set(&usc->cmd_state, 0);
@@ -417,7 +417,7 @@ int q6usm_us_client_buf_alloc(unsigned int dir,
 
 	port->buf_cnt = bufcnt;
 	port->buf_size = bufsz;
-	pr_debug("%s: data[%p]; phys[%llx]; [%p]\n", __func__,
+	pr_debug("%s: data[%pK]; phys[%llx]; [%pK]\n", __func__,
 		 (void *)port->data,
 		 (u64)port->phys,
 		 (void *)&port->phys);
@@ -482,7 +482,7 @@ int q6usm_us_param_buf_alloc(unsigned int dir,
 	}
 
 	port->param_buf_size = bufsz;
-	pr_debug("%s: param_buf[%p]; param_phys[%llx]; [%p]\n", __func__,
+	pr_debug("%s: param_buf[%pK]; param_phys[%llx]; [%pK]\n", __func__,
 		 (void *)port->param_buf,
 		 (u64)port->param_phys,
 		 (void *)&port->param_phys);
@@ -506,6 +506,12 @@ static int32_t q6usm_mmapcallback(struct apr_client_data *data, void *priv)
 {
 	uint32_t token;
 	uint32_t *payload = data->payload;
+
+	if (data->payload_size < (2 * sizeof(uint32_t))) {
+		pr_err("%s: payload has invalid size[%d]\n", __func__,
+		       data->payload_size);
+		return -EINVAL;
+	}
 
 	pr_debug("%s: ptr0[0x%x]; ptr1[0x%x]; opcode[0x%x]\n",
 		 __func__, payload[0], payload[1], data->opcode);
@@ -567,6 +573,11 @@ static int32_t q6usm_callback(struct apr_client_data *data, void *priv)
 	}
 
 	if (data->opcode == APR_BASIC_RSP_RESULT) {
+		if (data->payload_size < (2 * sizeof(uint32_t))) {
+			pr_err("%s: payload has invalid size[%d]\n", __func__,
+			       data->payload_size);
+			return -EINVAL;
+		}
 		/* status field check */
 		if (payload[1]) {
 			pr_err("%s: wrong response[%d] on cmd [%d]\n",
@@ -630,6 +641,14 @@ static int32_t q6usm_callback(struct apr_client_data *data, void *priv)
 
 		opcode = Q6USM_EVENT_READ_DONE;
 		spin_lock_irqsave(&port->dsp_lock, dsp_flags);
+		if (data->payload_size <
+		    (sizeof(uint32_t)*(READDONE_IDX_STATUS + 1))) {
+			pr_err("%s: Invalid payload size for READDONE[%d]\n",
+			       __func__, data->payload_size);
+			spin_unlock_irqrestore(&port->dsp_lock,
+					       dsp_flags);
+			return -EINVAL;
+		}
 		if (payload[READDONE_IDX_STATUS]) {
 			pr_err("%s: wrong READDONE[%d]; token[%d]\n",
 			       __func__,
@@ -675,6 +694,12 @@ static int32_t q6usm_callback(struct apr_client_data *data, void *priv)
 		struct us_port_data *port = &usc->port[IN];
 
 		opcode = Q6USM_EVENT_WRITE_DONE;
+		if (data->payload_size <
+		    (sizeof(uint32_t)*(WRITEDONE_IDX_STATUS + 1))) {
+			pr_err("%s: Invalid payload size for WRITEDONE[%d]\n",
+			       __func__, data->payload_size);
+			return -EINVAL;
+		}
 		if (payload[WRITEDONE_IDX_STATUS]) {
 			pr_err("%s: wrong WRITEDONE_IDX_STATUS[%d]\n",
 			       __func__,
@@ -793,12 +818,12 @@ int q6usm_open_read(struct us_client *usc,
 	int rc = 0x00;
 	struct usm_stream_cmd_open_read open;
 
-	pr_debug("%s: session[%d]", __func__, usc->session);
-
 	if ((usc == NULL) || (usc->apr == NULL)) {
 		pr_err("%s: client or its apr is NULL\n", __func__);
 		return -EINVAL;
 	}
+
+	pr_debug("%s: session[%d]", __func__, usc->session);
 
 	q6usm_add_hdr(usc, &open.hdr, sizeof(open), true);
 	open.hdr.opcode = USM_STREAM_CMD_OPEN_READ;
@@ -1040,12 +1065,12 @@ int q6usm_open_write(struct us_client *usc,
 	uint32_t int_format = INVALID_FORMAT;
 	struct usm_stream_cmd_open_write open;
 
-	pr_debug("%s: session[%d]", __func__, usc->session);
-
 	if ((usc == NULL) || (usc->apr == NULL)) {
 		pr_err("%s: APR handle NULL\n", __func__);
 		return -EINVAL;
 	}
+
+	pr_debug("%s: session[%d]", __func__, usc->session);
 
 	q6usm_add_hdr(usc, &open.hdr, sizeof(open), true);
 	open.hdr.opcode = USM_STREAM_CMD_OPEN_WRITE;
@@ -1335,7 +1360,7 @@ int q6usm_set_us_detection(struct us_client *usc,
 	if ((usc == NULL) ||
 	    (detect_info_size == 0) ||
 	    (detect_info == NULL)) {
-		pr_err("%s: wrong input: usc=0x%p, inf_size=%d; info=0x%p",
+		pr_err("%s: wrong input: usc=0x%pK, inf_size=%d; info=0x%pK",
 		       __func__,
 		       usc,
 		       detect_info_size,

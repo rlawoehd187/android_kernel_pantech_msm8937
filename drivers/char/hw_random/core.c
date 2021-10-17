@@ -78,12 +78,12 @@ static size_t rng_buffer_size(void)
 
 static void add_early_randomness(struct hwrng *rng)
 {
-	unsigned char bytes[16];
 	int bytes_read;
+	size_t size = min_t(size_t, 16, rng_buffer_size());
 
-	bytes_read = rng_get_data(rng, bytes, sizeof(bytes), 1);
+	bytes_read = rng_get_data(rng, rng_buffer, size, 1);
 	if (bytes_read > 0)
-		add_device_randomness(bytes, bytes_read);
+		add_device_randomness(rng_buffer, bytes_read);
 }
 
 static inline int hwrng_init(struct hwrng *rng)
@@ -346,8 +346,12 @@ static int hwrng_fillfn(void *unused)
 	long rc;
 
 	while (!kthread_should_stop()) {
-		if (!current_rng)
+		mutex_lock(&rng_mutex);
+		if (!current_rng) {
+			mutex_unlock(&rng_mutex);
 			break;
+		}
+		mutex_unlock(&rng_mutex);
 		rc = rng_get_data(current_rng, rng_fillbuf,
 				  rng_buffer_size(), 1);
 		if (rc <= 0) {
@@ -365,7 +369,7 @@ static int hwrng_fillfn(void *unused)
 static void start_khwrngd(void)
 {
 	hwrng_fill = kthread_run(hwrng_fillfn, NULL, "hwrng");
-	if (hwrng_fill == ERR_PTR(-ENOMEM)) {
+	if (IS_ERR(hwrng_fill)) {
 		pr_err("hwrng_fill thread creation failed");
 		hwrng_fill = NULL;
 	}

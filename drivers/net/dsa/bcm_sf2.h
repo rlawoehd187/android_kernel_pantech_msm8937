@@ -110,8 +110,8 @@ static inline u64 name##_readq(struct bcm_sf2_priv *priv, u32 off)	\
 	spin_unlock(&priv->indir_lock);					\
 	return (u64)indir << 32 | dir;					\
 }									\
-static inline void name##_writeq(struct bcm_sf2_priv *priv, u32 off,	\
-							u64 val)	\
+static inline void name##_writeq(struct bcm_sf2_priv *priv, u64 val,	\
+							u32 off)	\
 {									\
 	spin_lock(&priv->indir_lock);					\
 	reg_writel(priv, upper_32_bits(val), REG_DIR_DATA_WRITE);	\
@@ -123,8 +123,8 @@ static inline void name##_writeq(struct bcm_sf2_priv *priv, u32 off,	\
 static inline void intrl2_##which##_mask_clear(struct bcm_sf2_priv *priv, \
 						u32 mask)		\
 {									\
-	intrl2_##which##_writel(priv, mask, INTRL2_CPU_MASK_CLEAR);	\
 	priv->irq##which##_mask &= ~(mask);				\
+	intrl2_##which##_writel(priv, mask, INTRL2_CPU_MASK_CLEAR);	\
 }									\
 static inline void intrl2_##which##_mask_set(struct bcm_sf2_priv *priv, \
 						u32 mask)		\

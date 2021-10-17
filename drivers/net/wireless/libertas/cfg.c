@@ -272,6 +272,10 @@ add_ie_rates(u8 *tlv, const u8 *ie, int *nrates)
 	int hw, ap, ap_max = ie[1];
 	u8 hw_rate;
 
+	if (ap_max > MAX_RATES) {
+		lbs_deb_assoc("invalid rates\n");
+		return tlv;
+	}
 	/* Advance past IE header */
 	ie += 2;
 
@@ -835,14 +839,13 @@ static int lbs_cfg_scan(struct wiphy *wiphy,
  * Events
  */
 
-void lbs_send_disconnect_notification(struct lbs_private *priv)
+void lbs_send_disconnect_notification(struct lbs_private *priv,
+				      bool locally_generated)
 {
 	lbs_deb_enter(LBS_DEB_CFG80211);
 
-	cfg80211_disconnected(priv->dev,
-		0,
-		NULL, 0,
-		GFP_KERNEL);
+	cfg80211_disconnected(priv->dev, 0, NULL, 0, locally_generated,
+			      GFP_KERNEL);
 
 	lbs_deb_leave(LBS_DEB_CFG80211);
 }
@@ -1356,8 +1359,8 @@ static int lbs_cfg_connect(struct wiphy *wiphy, struct net_device *dev,
 
 	/* Find the BSS we want using available scan results */
 	bss = cfg80211_get_bss(wiphy, sme->channel, sme->bssid,
-		sme->ssid, sme->ssid_len,
-		WLAN_CAPABILITY_ESS, WLAN_CAPABILITY_ESS);
+		sme->ssid, sme->ssid_len, IEEE80211_BSS_TYPE_ESS,
+		IEEE80211_PRIVACY_ANY);
 	if (!bss) {
 		wiphy_err(wiphy, "assoc: bss %pM not in scan results\n",
 			  sme->bssid);
@@ -1458,7 +1461,7 @@ int lbs_disconnect(struct lbs_private *priv, u16 reason)
 
 	cfg80211_disconnected(priv->dev,
 			reason,
-			NULL, 0,
+			NULL, 0, true,
 			GFP_KERNEL);
 	priv->connect_status = LBS_DISCONNECTED;
 
@@ -1784,6 +1787,9 @@ static int lbs_ibss_join_existing(struct lbs_private *priv,
 	struct cmd_ds_802_11_ad_hoc_join cmd;
 	u8 preamble = RADIO_PREAMBLE_SHORT;
 	int ret = 0;
+	int hw, i;
+	u8 rates_max;
+	u8 *rates;
 
 	lbs_deb_enter(LBS_DEB_CFG80211);
 
@@ -1844,9 +1850,14 @@ static int lbs_ibss_join_existing(struct lbs_private *priv,
 	if (!rates_eid) {
 		lbs_add_rates(cmd.bss.rates);
 	} else {
-		int hw, i;
-		u8 rates_max = rates_eid[1];
-		u8 *rates = cmd.bss.rates;
+		rates_max = rates_eid[1];
+		if (rates_max > MAX_RATES) {
+			lbs_deb_join("invalid rates");
+			rcu_read_unlock();
+			ret = -EINVAL;
+			goto out;
+		}
+		rates = cmd.bss.rates;
 		for (hw = 0; hw < ARRAY_SIZE(lbs_rates); hw++) {
 			u8 hw_rate = lbs_rates[hw].bitrate / 5;
 			for (i = 0; i < rates_max; i++) {
@@ -2000,7 +2011,7 @@ static int lbs_join_ibss(struct wiphy *wiphy, struct net_device *dev,
 	 * bss list is populated already */
 	bss = cfg80211_get_bss(wiphy, params->chandef.chan, params->bssid,
 		params->ssid, params->ssid_len,
-		WLAN_CAPABILITY_IBSS, WLAN_CAPABILITY_IBSS);
+		IEEE80211_BSS_TYPE_IBSS, IEEE80211_PRIVACY_ANY);
 
 	if (bss) {
 		ret = lbs_ibss_join_existing(priv, params, bss);
@@ -2031,7 +2042,7 @@ static int lbs_leave_ibss(struct wiphy *wiphy, struct net_device *dev)
 	ret = lbs_cmd_with_response(priv, CMD_802_11_AD_HOC_STOP, &cmd);
 
 	/* TODO: consider doing this at MACREG_INT_CODE_ADHOC_BCN_LOST time */
-	lbs_mac_event_disconnected(priv);
+	lbs_mac_event_disconnected(priv, true);
 
 	lbs_deb_leave_args(LBS_DEB_CFG80211, "ret %d", ret);
 	return ret;

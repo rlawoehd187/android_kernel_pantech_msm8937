@@ -7,6 +7,11 @@
 #define MAX_ION_FD  4
 #define MAX_APP_NAME_SIZE  64
 #define QSEECOM_HASH_SIZE  32
+
+/* qseecom_ta_heap allocation retry delay (ms) and max attemp count */
+#define QSEECOM_TA_ION_ALLOCATE_DELAY           50
+#define QSEECOM_TA_ION_ALLOCATE_MAX_ATTEMP      20
+
 /*
  * struct qseecom_register_listener_req -
  *      for register listener ioctl request
@@ -92,7 +97,7 @@ struct qseecom_load_img_req {
 	int32_t  ifd_data_fd; /* in */
 	char	 img_name[MAX_APP_NAME_SIZE]; /* in */
 	uint32_t app_arch; /* in */
-	int app_id; /* out*/
+	uint32_t app_id; /* out*/
 };
 
 struct qseecom_set_sb_mem_param_req {
@@ -116,7 +121,7 @@ struct qseecom_qseos_version_req {
  */
 struct qseecom_qseos_app_load_query {
 	char app_name[MAX_APP_NAME_SIZE]; /* in */
-	int app_id; /* out */
+	uint32_t app_id; /* out */
 	uint32_t app_arch;
 };
 

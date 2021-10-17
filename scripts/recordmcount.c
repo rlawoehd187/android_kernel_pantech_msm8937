@@ -33,10 +33,17 @@
 #include <string.h>
 #include <unistd.h>
 
+/*
+ * glibc synced up and added the metag number but didn't add the relocations.
+ * Work around this in a crude manner for now.
+ */
 #ifndef EM_METAG
-/* Remove this when these make it to the standard system elf.h. */
 #define EM_METAG      174
+#endif
+#ifndef R_METAG_ADDR32
 #define R_METAG_ADDR32                   2
+#endif
+#ifndef R_METAG_NONE
 #define R_METAG_NONE                     3
 #endif
 
@@ -44,6 +51,10 @@
 #define EM_AARCH64	183
 #define R_AARCH64_ABS64	257
 #endif
+
+#define R_ARM_PC24		1
+#define R_ARM_THM_CALL		10
+#define R_ARM_CALL		28
 
 static int fd_map;	/* File descriptor for file being modified. */
 static int mmap_failed; /* Boolean flag. */
@@ -194,6 +205,20 @@ static void *mmap_file(char const *fname)
 		addr = umalloc(sb.st_size);
 		uread(fd_map, addr, sb.st_size);
 	}
+	if (sb.st_nlink != 1) {
+		/* file is hard-linked, break the hard link */
+		close(fd_map);
+		if (unlink(fname) < 0) {
+			perror(fname);
+			fail_file();
+		}
+		fd_map = open(fname, O_RDWR | O_CREAT, sb.st_mode);
+		if (fd_map < 0) {
+			perror(fname);
+			fail_file();
+		}
+		uwrite(fd_map, addr, sb.st_size);
+	}
 	return addr;
 }
 
@@ -261,6 +286,18 @@ is_mcounted_section_name(char const *const txtname)
 #include "recordmcount.h"
 #define RECORD_MCOUNT_64
 #include "recordmcount.h"
+
+static int arm_is_fake_mcount(Elf32_Rel const *rp)
+{
+	switch (ELF32_R_TYPE(w(rp->r_info))) {
+	case R_ARM_THM_CALL:
+	case R_ARM_CALL:
+	case R_ARM_PC24:
+		return 0;
+	}
+
+	return 1;
+}
 
 /* 64-bit EM_MIPS has weird ELF64_Rela.r_info.
  * http://techpubs.sgi.com/library/manuals/4000/007-4658-001/pdf/007-4658-001.pdf
@@ -351,6 +388,7 @@ do_file(char const *const fname)
 		break;
 	case EM_ARM:	 reltype = R_ARM_ABS32;
 			 altmcount = "__gnu_mcount_nc";
+			 is_fake_mcount32 = arm_is_fake_mcount;
 			 break;
 	case EM_AARCH64:
 			 reltype = R_AARCH64_ABS64; gpfx = '_'; break;

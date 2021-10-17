@@ -2,6 +2,7 @@
 #define _AF_NETLINK_H
 
 #include <linux/rhashtable.h>
+#include <linux/workqueue.h>
 #include <net/sock.h>
 
 #define NLGRPSZ(x)	(ALIGN(x, sizeof(unsigned long) * 8) / 8)
@@ -35,6 +36,7 @@ struct netlink_sock {
 	size_t			max_recvmsg_len;
 	wait_queue_head_t	wait;
 	bool			cb_running;
+	int			dump_done_errno;
 	struct netlink_callback	cb;
 	struct mutex		*cb_mutex;
 	struct mutex		cb_def_mutex;
@@ -42,14 +44,9 @@ struct netlink_sock {
 	int			(*netlink_bind)(int group);
 	void			(*netlink_unbind)(int group);
 	struct module		*module;
-#ifdef CONFIG_NETLINK_MMAP
-	struct mutex		pg_vec_lock;
-	struct netlink_ring	rx_ring;
-	struct netlink_ring	tx_ring;
-	atomic_t		mapped;
-#endif /* CONFIG_NETLINK_MMAP */
 
 	struct rhash_head	node;
+	struct work_struct	work;
 };
 
 static inline struct netlink_sock *nlk_sk(struct sock *sk)

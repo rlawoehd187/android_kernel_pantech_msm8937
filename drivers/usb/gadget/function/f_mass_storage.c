@@ -439,7 +439,11 @@ static int fsg_set_halt(struct fsg_dev *fsg, struct usb_ep *ep)
 /* Caller must hold fsg->lock */
 static void wakeup_thread(struct fsg_common *common)
 {
-	smp_wmb();	/* ensure the write of bh->state is complete */
+	/*
+	 * Ensure the reading of thread_wakeup_needed
+	 * and the writing of bh->state are completed
+	 */
+	smp_mb();
 	/* Tell the main thread that something has happened */
 	common->thread_wakeup_needed = 1;
 	if (common->thread_task)
@@ -538,15 +542,24 @@ static void bulk_out_complete(struct usb_ep *ep, struct usb_request *req)
 	}
 #endif
 
-	dump_msg(common, "bulk-out", req->buf, req->actual);
 	if (req->status || req->actual != bh->bulk_out_intended_length)
-		DBG(common, "%s --> %d, %u/%u\n", __func__,
+		pr_debug("%s --> %d, %u/%u\n", __func__,
 		    req->status, req->actual, bh->bulk_out_intended_length);
 	if (req->status == -ECONNRESET)		/* Request was cancelled */
 		usb_ep_fifo_flush(ep);
 
 	/* Hold the lock while we update the request and buffer states */
 	smp_wmb();
+	/*
+	 * Disconnect and completion might race each other and driver data
+	 * is set to NULL during ep disable. So, add a check if that is case.
+	 */
+	if (!common) {
+		bh->outreq_busy = 0;
+		return;
+	}
+
+	dump_msg(common, "bulk-out", req->buf, req->actual);
 	spin_lock(&common->lock);
 	bh->outreq_busy = 0;
 	bh->state = BUF_STATE_FULL;
@@ -702,7 +715,12 @@ static int sleep_thread(struct fsg_common *common, bool can_freeze)
 	spin_lock_irq(&common->lock);
 	common->thread_wakeup_needed = 0;
 	spin_unlock_irq(&common->lock);
-	smp_rmb();	/* ensure the latest bh->state is visible */
+
+	/*
+	 * Ensure the writing of thread_wakeup_needed
+	 * and the reading of bh->state are completed
+	 */
+	smp_mb();
 	return rc;
 }
 
@@ -2914,6 +2932,13 @@ static int fsg_main_thread(void *common_)
 
 /*************************** DEVICE ATTRIBUTES ***************************/
 
+static ssize_t cdrom_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct fsg_lun		*curlun = fsg_lun_from_dev(dev);
+
+	return fsg_show_cdrom(curlun, buf);
+}
+
 static ssize_t ro_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct fsg_lun		*curlun = fsg_lun_from_dev(dev);
@@ -2936,6 +2961,15 @@ static ssize_t file_show(struct device *dev, struct device_attribute *attr,
 	struct rw_semaphore	*filesem = dev_get_drvdata(dev);
 
 	return fsg_show_file(curlun, filesem, buf);
+}
+
+static ssize_t cdrom_store(struct device *dev, struct device_attribute *attr,
+			const char *buf, size_t count)
+{
+	struct fsg_lun		*curlun = fsg_lun_from_dev(dev);
+	struct rw_semaphore	*filesem = dev_get_drvdata(dev);
+
+	return fsg_store_cdrom(curlun, filesem, buf, count);
 }
 
 static ssize_t ro_store(struct device *dev, struct device_attribute *attr,
@@ -2964,12 +2998,12 @@ static ssize_t file_store(struct device *dev, struct device_attribute *attr,
 	return fsg_store_file(curlun, filesem, buf, count);
 }
 
+static DEVICE_ATTR_RW(cdrom);
 static DEVICE_ATTR_RW(ro);
 static DEVICE_ATTR_RW(nofua);
 static DEVICE_ATTR_RW(file);
 static DEVICE_ATTR(perf, 0644, fsg_show_perf, fsg_store_perf);
 
-static struct device_attribute dev_attr_ro_cdrom = __ATTR_RO(ro);
 static struct device_attribute dev_attr_file_nonremovable = __ATTR_RO(file);
 
 
@@ -3115,6 +3149,7 @@ static inline void fsg_common_remove_sysfs(struct fsg_lun *lun)
 	 * so we don't differentiate between removing e.g. dev_attr_ro_cdrom
 	 * and dev_attr_ro
 	 */
+	device_remove_file(&lun->dev, &dev_attr_cdrom);
 	device_remove_file(&lun->dev, &dev_attr_ro);
 	device_remove_file(&lun->dev, &dev_attr_file);
 	device_remove_file(&lun->dev, &dev_attr_perf);
@@ -3240,10 +3275,10 @@ static inline int fsg_common_add_sysfs(struct fsg_common *common,
 		return rc;
 	}
 
-	rc = device_create_file(&lun->dev,
-				lun->cdrom
-			      ? &dev_attr_ro_cdrom
-			      : &dev_attr_ro);
+	rc = device_create_file(&lun->dev, &dev_attr_cdrom);
+	if (rc)
+		goto error;
+	rc = device_create_file(&lun->dev, &dev_attr_ro);
 	if (rc)
 		goto error;
 	rc = device_create_file(&lun->dev,
@@ -3395,25 +3430,6 @@ void fsg_common_set_inquiry_string(struct fsg_common *common, const char *vn,
 }
 EXPORT_SYMBOL_GPL(fsg_common_set_inquiry_string);
 
-int fsg_common_run_thread(struct fsg_common *common)
-{
-	common->state = FSG_STATE_IDLE;
-	/* Tell the thread to start working */
-	common->thread_task =
-		kthread_create(fsg_main_thread, common, "file-storage");
-	if (IS_ERR(common->thread_task)) {
-		common->state = FSG_STATE_TERMINATED;
-		return PTR_ERR(common->thread_task);
-	}
-
-	DBG(common, "I/O thread pid: %d\n", task_pid_nr(common->thread_task));
-
-	wake_up_process(common->thread_task);
-
-	return 0;
-}
-EXPORT_SYMBOL_GPL(fsg_common_run_thread);
-
 static void fsg_common_release(struct kref *ref)
 {
 	struct fsg_common *common = container_of(ref, struct fsg_common, ref);
@@ -3422,6 +3438,7 @@ static void fsg_common_release(struct kref *ref)
 	if (common->state != FSG_STATE_TERMINATED) {
 		raise_exception(common, FSG_STATE_EXIT);
 		wait_for_completion(&common->thread_notifier);
+		common->thread_task = NULL;
 	}
 
 	if (likely(common->luns)) {
@@ -3506,9 +3523,21 @@ static int fsg_bind(struct usb_configuration *c, struct usb_function *f)
 		if (ret)
 			return ret;
 		fsg_common_set_inquiry_string(fsg->common, NULL, NULL);
-		ret = fsg_common_run_thread(fsg->common);
-		if (ret)
+	}
+
+	if (!fsg->common->thread_task) {
+		fsg->common->state = FSG_STATE_IDLE;
+		fsg->common->thread_task =
+			kthread_create(fsg_main_thread, fsg->common, "file-storage");
+		if (IS_ERR(fsg->common->thread_task)) {
+			int ret = PTR_ERR(fsg->common->thread_task);
+			fsg->common->thread_task = NULL;
+			fsg->common->state = FSG_STATE_TERMINATED;
 			return ret;
+		}
+		DBG(fsg->common, "I/O thread pid: %d\n",
+		    task_pid_nr(fsg->common->thread_task));
+		wake_up_process(fsg->common->thread_task);
 	}
 
 	fsg->gadget = gadget;
@@ -3788,7 +3817,6 @@ static void fsg_lun_drop(struct config_group *group, struct config_item *item)
 		struct config_item *gadget;
 
 		gadget = group->cg_item.ci_parent->ci_parent;
-		unregister_gadget_item(gadget);
 	}
 
 	fsg_common_remove_lun(lun_opts->lun, fsg_opts->common->sysfs);

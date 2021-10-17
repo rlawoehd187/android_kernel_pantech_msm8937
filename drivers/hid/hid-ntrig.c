@@ -866,7 +866,7 @@ static int ntrig_input_configured(struct hid_device *hid,
 	struct input_dev *input = hidinput->input;
 
 	if (hidinput->report->maxfield < 1)
-		return -EINVAL;
+		return 0;
 
 	switch (hidinput->report->field[0]->application) {
 	case HID_DG_PEN:
@@ -955,6 +955,8 @@ static int ntrig_probe(struct hid_device *hdev, const struct hid_device_id *id)
 
 	ret = sysfs_create_group(&hdev->dev.kobj,
 			&ntrig_attribute_group);
+	if (ret)
+		hid_err(hdev, "cannot create sysfs group\n");
 
 	return 0;
 err_free:

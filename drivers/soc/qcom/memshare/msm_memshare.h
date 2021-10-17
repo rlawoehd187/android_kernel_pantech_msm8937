@@ -1,4 +1,4 @@
-/* Copyright (c) 2013-2016, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2016, 2018, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -38,6 +38,8 @@ struct mem_blocks {
 	uint32_t guarantee;
 	/* Memory alloted or not */
 	uint32_t alloted;
+	/* Allocation on request from a client*/
+	uint32_t client_request;
 	/* Size required for client */
 	uint32_t size;
 	/*
@@ -51,6 +53,9 @@ struct mem_blocks {
 	uint8_t free_memory;
 	/* Need Hypervisor mapping*/
 	uint8_t hyp_mapping;
+	/* Status flag which checks if ramdump file is created*/
+	int file_created;
+
 };
 
 int memshare_alloc(struct device *dev,

@@ -31,7 +31,9 @@
 #include <net/route.h>
 #include <net/snmp.h>
 #include <net/flow.h>
-#include <net/flow_keys.h>
+#include <net/flow_dissector.h>
+
+#define IPV4_MIN_MTU		68			/* RFC 791 */
 
 struct sock;
 
@@ -160,6 +162,7 @@ static inline __u8 get_rtconn_flags(struct ipcm_cookie* ipc, struct sock* sk)
 }
 
 /* datagram.c */
+int __ip4_datagram_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len);
 int ip4_datagram_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len);
 
 void ip4_datagram_release_cb(struct sock *sk);
@@ -234,6 +237,7 @@ static inline int inet_is_local_reserved_port(struct net *net, int port)
 #endif
 
 extern int sysctl_reserved_port_bind;
+__be32 inet_current_timestamp(void);
 
 /* From inetpeer.c */
 extern int inet_peer_threshold;
@@ -301,11 +305,17 @@ static inline unsigned int ip_dst_mtu_maybe_forward(const struct dst_entry *dst,
 						    bool forwarding)
 {
 	struct net *net = dev_net(dst->dev);
+	unsigned int mtu;
 
 	if (net->ipv4.sysctl_ip_fwd_use_pmtu ||
 	    dst_metric_locked(dst, RTAX_MTU) ||
 	    !forwarding)
 		return dst_mtu(dst);
+
+	/* 'forwarding = true' case should always honour route mtu */
+	mtu = dst_metric_raw(dst, RTAX_MTU);
+	if (mtu)
+		return mtu;
 
 	return min(dst->dev->mtu, IP_MAX_MTU);
 }
@@ -321,9 +331,10 @@ static inline unsigned int ip_skb_dst_mtu(const struct sk_buff *skb)
 }
 
 u32 ip_idents_reserve(u32 hash, int segs);
-void __ip_select_ident(struct iphdr *iph, int segs);
+void __ip_select_ident(struct net *net, struct iphdr *iph, int segs);
 
-static inline void ip_select_ident_segs(struct sk_buff *skb, struct sock *sk, int segs)
+static inline void ip_select_ident_segs(struct net *net, struct sk_buff *skb,
+					struct sock *sk, int segs)
 {
 	struct iphdr *iph = ip_hdr(skb);
 
@@ -340,13 +351,14 @@ static inline void ip_select_ident_segs(struct sk_buff *skb, struct sock *sk, in
 			iph->id = 0;
 		}
 	} else {
-		__ip_select_ident(iph, segs);
+		__ip_select_ident(net, iph, segs);
 	}
 }
 
-static inline void ip_select_ident(struct sk_buff *skb, struct sock *sk)
+static inline void ip_select_ident(struct net *net, struct sk_buff *skb,
+				   struct sock *sk)
 {
-	ip_select_ident_segs(skb, sk, 1);
+	ip_select_ident_segs(net, skb, sk, 1);
 }
 
 static inline __wsum inet_compute_pseudo(struct sk_buff *skb, int proto)
@@ -360,10 +372,12 @@ static inline void inet_set_txhash(struct sock *sk)
 	struct inet_sock *inet = inet_sk(sk);
 	struct flow_keys keys;
 
-	keys.src = inet->inet_saddr;
-	keys.dst = inet->inet_daddr;
-	keys.port16[0] = inet->inet_sport;
-	keys.port16[1] = inet->inet_dport;
+	memset(&keys, 0, sizeof(keys));
+
+	keys.addrs.src = inet->inet_saddr;
+	keys.addrs.dst = inet->inet_daddr;
+	keys.ports.port16[0] = inet->inet_sport;
+	keys.ports.port16[1] = inet->inet_dport;
 
 	sk->sk_txhash = flow_hash_from_keys(&keys);
 }
@@ -510,6 +524,8 @@ static inline int ip_options_echo(struct ip_options *dopt, struct sk_buff *skb)
 }
 
 void ip_options_fragment(struct sk_buff *skb);
+int __ip_options_compile(struct net *net, struct ip_options *opt,
+			 struct sk_buff *skb, __be32 *info);
 int ip_options_compile(struct net *net, struct ip_options *opt,
 		       struct sk_buff *skb);
 int ip_options_get(struct net *net, struct ip_options_rcu **optp,
@@ -552,5 +568,10 @@ extern int sysctl_icmp_msgs_burst;
 #ifdef CONFIG_PROC_FS
 int ip_misc_proc_init(void);
 #endif
+
+static inline bool inetdev_valid_mtu(unsigned int mtu)
+{
+	return likely(mtu >= IPV4_MIN_MTU);
+}
 
 #endif	/* _IP_H */

@@ -9,9 +9,9 @@
 
 #define RNDIS_REG(x) (0x80 + ((x - 1) * 4))
 
-#define EP_MODE_AUTOREG_NONE		0
-#define EP_MODE_AUTOREG_ALL_NEOP	1
-#define EP_MODE_AUTOREG_ALWAYS		3
+#define EP_MODE_AUTOREQ_NONE		0
+#define EP_MODE_AUTOREQ_ALL_NEOP	1
+#define EP_MODE_AUTOREQ_ALWAYS		3
 
 #define EP_MODE_DMA_TRANSPARENT		0
 #define EP_MODE_DMA_RNDIS		1
@@ -248,8 +248,29 @@ static void cppi41_dma_callback(void *private_data)
 			transferred < cppi41_channel->packet_sz)
 		cppi41_channel->prog_len = 0;
 
-	empty = musb_is_tx_fifo_empty(hw_ep);
-	if (empty) {
+	if (cppi41_channel->is_tx) {
+		u8 type;
+
+		if (is_host_active(musb))
+			type = hw_ep->out_qh->type;
+		else
+			type = hw_ep->ep_in.type;
+
+		if (type == USB_ENDPOINT_XFER_ISOC)
+			/*
+			 * Don't use the early-TX-interrupt workaround below
+			 * for Isoch transfter. Since Isoch are periodic
+			 * transfer, by the time the next transfer is
+			 * scheduled, the current one should be done already.
+			 *
+			 * This avoids audio playback underrun issue.
+			 */
+			empty = true;
+		else
+			empty = musb_is_tx_fifo_empty(hw_ep);
+	}
+
+	if (!cppi41_channel->is_tx || empty) {
 		cppi41_trans_done(cppi41_channel);
 	} else {
 		struct cppi41_dma_controller *controller;
@@ -396,19 +417,19 @@ static bool cppi41_configure_channel(struct dma_channel *channel,
 
 			/* auto req */
 			cppi41_set_autoreq_mode(cppi41_channel,
-					EP_MODE_AUTOREG_ALL_NEOP);
+					EP_MODE_AUTOREQ_ALL_NEOP);
 		} else {
 			musb_writel(musb->ctrl_base,
 					RNDIS_REG(cppi41_channel->port_num), 0);
 			cppi41_set_dma_mode(cppi41_channel,
 					EP_MODE_DMA_TRANSPARENT);
 			cppi41_set_autoreq_mode(cppi41_channel,
-					EP_MODE_AUTOREG_NONE);
+					EP_MODE_AUTOREQ_NONE);
 		}
 	} else {
 		/* fallback mode */
 		cppi41_set_dma_mode(cppi41_channel, EP_MODE_DMA_TRANSPARENT);
-		cppi41_set_autoreq_mode(cppi41_channel, EP_MODE_AUTOREG_NONE);
+		cppi41_set_autoreq_mode(cppi41_channel, EP_MODE_AUTOREQ_NONE);
 		len = min_t(u32, packet_sz, len);
 	}
 	cppi41_channel->prog_len = len;
@@ -541,9 +562,17 @@ static int cppi41_dma_channel_abort(struct dma_channel *channel)
 		csr &= ~MUSB_TXCSR_DMAENAB;
 		musb_writew(epio, MUSB_TXCSR, csr);
 	} else {
+		cppi41_set_autoreq_mode(cppi41_channel, EP_MODE_AUTOREQ_NONE);
+
+		/* delay to drain to cppi dma pipeline for isoch */
+		udelay(250);
+
 		csr = musb_readw(epio, MUSB_RXCSR);
 		csr &= ~(MUSB_RXCSR_H_REQPKT | MUSB_RXCSR_DMAENAB);
 		musb_writew(epio, MUSB_RXCSR, csr);
+
+		/* wait to drain cppi dma pipe line */
+		udelay(50);
 
 		csr = musb_readw(epio, MUSB_RXCSR);
 		if (csr & MUSB_RXCSR_RXPKTRDY) {
@@ -558,13 +587,14 @@ static int cppi41_dma_channel_abort(struct dma_channel *channel)
 		tdbit <<= 16;
 
 	do {
-		musb_writel(musb->ctrl_base, USB_TDOWN, tdbit);
+		if (is_tx)
+			musb_writel(musb->ctrl_base, USB_TDOWN, tdbit);
 		ret = dmaengine_terminate_all(cppi41_channel->dc);
 	} while (ret == -EAGAIN);
 
-	musb_writel(musb->ctrl_base, USB_TDOWN, tdbit);
-
 	if (is_tx) {
+		musb_writel(musb->ctrl_base, USB_TDOWN, tdbit);
+
 		csr = musb_readw(epio, MUSB_TXCSR);
 		if (csr & MUSB_TXCSR_TXPKTRDY) {
 			csr |= MUSB_TXCSR_FLUSHFIFO;
@@ -600,7 +630,7 @@ static int cppi41_dma_controller_start(struct cppi41_dma_controller *controller)
 {
 	struct musb *musb = controller->musb;
 	struct device *dev = musb->controller;
-	struct device_node *np = dev->of_node;
+	struct device_node *np = dev->parent->of_node;
 	struct cppi41_dma_channel *cppi41_channel;
 	int count;
 	int i;
@@ -620,9 +650,9 @@ static int cppi41_dma_controller_start(struct cppi41_dma_controller *controller)
 		ret = of_property_read_string_index(np, "dma-names", i, &str);
 		if (ret)
 			goto err;
-		if (!strncmp(str, "tx", 2))
+		if (strstarts(str, "tx"))
 			is_tx = 1;
-		else if (!strncmp(str, "rx", 2))
+		else if (strstarts(str, "rx"))
 			is_tx = 0;
 		else {
 			dev_err(dev, "Wrong dmatype %s\n", str);
@@ -650,7 +680,7 @@ static int cppi41_dma_controller_start(struct cppi41_dma_controller *controller)
 		musb_dma->status = MUSB_DMA_STATUS_FREE;
 		musb_dma->max_len = SZ_4M;
 
-		dc = dma_request_slave_channel(dev, str);
+		dc = dma_request_slave_channel(dev->parent, str);
 		if (!dc) {
 			dev_err(dev, "Failed to request %s.\n", str);
 			ret = -EPROBE_DEFER;
@@ -680,7 +710,7 @@ struct dma_controller *dma_controller_create(struct musb *musb,
 	struct cppi41_dma_controller *controller;
 	int ret = 0;
 
-	if (!musb->controller->of_node) {
+	if (!musb->controller->parent->of_node) {
 		dev_err(musb->controller, "Need DT for the DMA engine.\n");
 		return NULL;
 	}

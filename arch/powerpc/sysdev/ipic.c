@@ -672,7 +672,8 @@ static struct irq_chip ipic_edge_irq_chip = {
 	.irq_set_type	= ipic_set_irq_type,
 };
 
-static int ipic_host_match(struct irq_domain *h, struct device_node *node)
+static int ipic_host_match(struct irq_domain *h, struct device_node *node,
+			   enum irq_domain_bus_token bus_token)
 {
 	/* Exact match, unless ipic node is NULL */
 	return h->of_node == NULL || h->of_node == node;
@@ -844,12 +845,12 @@ void ipic_disable_mcp(enum ipic_mcp_irq mcp_irq)
 
 u32 ipic_get_mcp_status(void)
 {
-	return ipic_read(primary_ipic->regs, IPIC_SERMR);
+	return ipic_read(primary_ipic->regs, IPIC_SERSR);
 }
 
 void ipic_clear_mcp_status(u32 mask)
 {
-	ipic_write(primary_ipic->regs, IPIC_SERMR, mask);
+	ipic_write(primary_ipic->regs, IPIC_SERSR, mask);
 }
 
 /* Return an interrupt vector or NO_IRQ if no interrupt is pending. */

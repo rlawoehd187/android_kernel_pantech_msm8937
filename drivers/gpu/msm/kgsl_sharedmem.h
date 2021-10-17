@@ -1,4 +1,4 @@
-/* Copyright (c) 2002,2007-2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2002,2007-2017, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -26,7 +26,7 @@ struct kgsl_process_private;
 
 int kgsl_sharedmem_alloc_contig(struct kgsl_device *device,
 			struct kgsl_memdesc *memdesc,
-			struct kgsl_pagetable *pagetable, uint64_t size);
+			uint64_t size);
 
 void kgsl_sharedmem_free(struct kgsl_memdesc *memdesc);
 
@@ -66,10 +66,12 @@ void kgsl_sharedmem_uninit_sysfs(void);
 
 int kgsl_allocate_user(struct kgsl_device *device,
 		struct kgsl_memdesc *memdesc,
-		struct kgsl_pagetable *pagetable,
 		uint64_t size, uint64_t flags);
 
 void kgsl_get_memory_usage(char *str, size_t len, uint64_t memflags);
+
+int kgsl_sharedmem_page_alloc_user(struct kgsl_memdesc *memdesc,
+				uint64_t size);
 
 #define MEMFLAGS(_flags, _mask, _shift) \
 	((unsigned int) (((_flags) & (_mask)) >> (_shift)))
@@ -259,16 +261,25 @@ kgsl_memdesc_footprint(const struct kgsl_memdesc *memdesc)
  */
 static inline int kgsl_allocate_global(struct kgsl_device *device,
 	struct kgsl_memdesc *memdesc, uint64_t size, uint64_t flags,
-	unsigned int priv)
+	unsigned int priv, const char *name)
 {
 	int ret;
 
 	memdesc->flags = flags;
 	memdesc->priv = priv;
 
-	ret = kgsl_sharedmem_alloc_contig(device, memdesc, NULL, (size_t) size);
+	if (((memdesc->priv & KGSL_MEMDESC_CONTIG) != 0) ||
+		(kgsl_mmu_get_mmutype(device) == KGSL_MMU_TYPE_NONE))
+		ret = kgsl_sharedmem_alloc_contig(device, memdesc,
+						(size_t) size);
+	else {
+		ret = kgsl_sharedmem_page_alloc_user(memdesc, (size_t) size);
+		if (ret == 0)
+			kgsl_memdesc_map(memdesc);
+	}
+
 	if (ret == 0)
-		kgsl_mmu_add_global(device, memdesc);
+		kgsl_mmu_add_global(device, memdesc, name);
 
 	return ret;
 }
@@ -292,5 +303,79 @@ static inline void kgsl_free_global(struct kgsl_device *device,
 
 void kgsl_sharedmem_set_noretry(bool val);
 bool kgsl_sharedmem_get_noretry(void);
+
+/**
+ * kgsl_alloc_sgt_from_pages() - Allocate a sg table
+ *
+ * @memdesc: memory descriptor of the allocation
+ *
+ * Allocate and return pointer to a sg table
+ */
+static inline struct sg_table *kgsl_alloc_sgt_from_pages(
+				struct kgsl_memdesc *m)
+{
+	int ret;
+	struct sg_table *sgt;
+
+	sgt = kmalloc(sizeof(struct sg_table), GFP_KERNEL);
+	if (sgt == NULL)
+		return ERR_PTR(-ENOMEM);
+
+	ret = sg_alloc_table_from_pages(sgt, m->pages, m->page_count, 0,
+					m->size, GFP_KERNEL);
+	if (ret) {
+		kfree(sgt);
+		return ERR_PTR(ret);
+	}
+
+	return sgt;
+}
+
+/**
+ * kgsl_free_sgt() - Free a sg table structure
+ *
+ * @sgt: sg table pointer to be freed
+ *
+ * Free the sg table allocated using sgt and free the
+ * sgt structure itself
+ */
+static inline void kgsl_free_sgt(struct sg_table *sgt)
+{
+	if (sgt != NULL) {
+		sg_free_table(sgt);
+		kfree(sgt);
+	}
+}
+
+#include "kgsl_pool.h"
+
+/**
+ * kgsl_get_page_size() - Get supported pagesize
+ * @size: Size of the page
+ * @align: Desired alignment of the size
+ *
+ * Return supported pagesize
+ */
+#ifndef CONFIG_ALLOC_BUFFERS_IN_4K_CHUNKS
+static inline int kgsl_get_page_size(size_t size, unsigned int align)
+{
+	if (align >= ilog2(SZ_1M) && size >= SZ_1M &&
+		kgsl_pool_avaialable(SZ_1M))
+		return SZ_1M;
+	else if (align >= ilog2(SZ_64K) && size >= SZ_64K &&
+		kgsl_pool_avaialable(SZ_64K))
+		return SZ_64K;
+	else if (align >= ilog2(SZ_8K) && size >= SZ_8K &&
+		kgsl_pool_avaialable(SZ_8K))
+		return SZ_8K;
+	else
+		return PAGE_SIZE;
+}
+#else
+static inline int kgsl_get_page_size(size_t size, unsigned int align)
+{
+	return PAGE_SIZE;
+}
+#endif
 
 #endif /* __KGSL_SHAREDMEM_H */

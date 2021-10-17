@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2019 The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -81,6 +81,10 @@ static int msm_route_hfp_vol_control;
 static const DECLARE_TLV_DB_LINEAR(hfp_rx_vol_gain, 0,
 				INT_RX_VOL_MAX_STEPS);
 
+static int msm_route_icc_vol_control;
+static const DECLARE_TLV_DB_LINEAR(icc_rx_vol_gain, 0,
+				INT_RX_VOL_MAX_STEPS);
+
 static int msm_route_pri_auxpcm_lb_vol_ctrl;
 static const DECLARE_TLV_DB_LINEAR(pri_auxpcm_lb_vol_gain, 0,
 				INT_RX_VOL_MAX_STEPS);
@@ -88,6 +92,8 @@ static const DECLARE_TLV_DB_LINEAR(pri_auxpcm_lb_vol_gain, 0,
 static int msm_route_sec_auxpcm_lb_vol_ctrl;
 static const DECLARE_TLV_DB_LINEAR(sec_auxpcm_lb_vol_gain, 0,
 				INT_RX_VOL_MAX_STEPS);
+
+static int msm_multichannel_ec_primary_mic_ch;
 
 static void msm_qti_pp_send_eq_values_(int eq_idx)
 {
@@ -337,7 +343,7 @@ static int msm_qti_pp_get_rms_value_control(struct snd_kcontrol *kcontrol,
 	uint32_t param_length = sizeof(uint32_t);
 	uint32_t param_payload_len = RMS_PAYLOAD_LEN * sizeof(uint32_t);
 	struct msm_pcm_routing_bdai_data msm_bedai;
-	param_value = kzalloc(param_length, GFP_KERNEL);
+	param_value = kzalloc(param_length + param_payload_len, GFP_KERNEL);
 	if (!param_value) {
 		pr_err("%s, param memory alloc failed\n", __func__);
 		return -ENOMEM;
@@ -392,6 +398,9 @@ static int msm_qti_pp_put_rms_value_control(struct snd_kcontrol *kcontrol,
 /* VOLUME */
 static int msm_route_fm_vol_control;
 static int msm_afe_lb_vol_ctrl;
+static int msm_afe_sec_mi2s_lb_vol_ctrl;
+static int msm_afe_tert_mi2s_lb_vol_ctrl;
+static int msm_afe_quat_mi2s_lb_vol_ctrl;
 static const DECLARE_TLV_DB_LINEAR(fm_rx_vol_gain, 0, INT_RX_VOL_MAX_STEPS);
 static const DECLARE_TLV_DB_LINEAR(afe_lb_vol_gain, 0, INT_RX_VOL_MAX_STEPS);
 
@@ -430,10 +439,27 @@ static int msm_qti_pp_set_pri_mi2s_lb_vol_mixer(struct snd_kcontrol *kcontrol,
 	return 0;
 }
 
+static int msm_qti_pp_get_sec_mi2s_lb_vol_mixer(struct snd_kcontrol *kcontrol,
+				       struct snd_ctl_elem_value *ucontrol)
+{
+	ucontrol->value.integer.value[0] = msm_afe_sec_mi2s_lb_vol_ctrl;
+	return 0;
+}
+
+static int msm_qti_pp_set_sec_mi2s_lb_vol_mixer(struct snd_kcontrol *kcontrol,
+			    struct snd_ctl_elem_value *ucontrol)
+{
+	afe_loopback_gain(AFE_PORT_ID_SECONDARY_MI2S_TX,
+			  ucontrol->value.integer.value[0]);
+	msm_afe_sec_mi2s_lb_vol_ctrl = ucontrol->value.integer.value[0];
+
+	return 0;
+}
+
 static int msm_qti_pp_get_tert_mi2s_lb_vol_mixer(struct snd_kcontrol *kcontrol,
 				       struct snd_ctl_elem_value *ucontrol)
 {
-	ucontrol->value.integer.value[0] = msm_afe_lb_vol_ctrl;
+	ucontrol->value.integer.value[0] = msm_afe_tert_mi2s_lb_vol_ctrl;
 	return 0;
 }
 
@@ -442,14 +468,31 @@ static int msm_qti_pp_set_tert_mi2s_lb_vol_mixer(struct snd_kcontrol *kcontrol,
 {
 	afe_loopback_gain(AFE_PORT_ID_TERTIARY_MI2S_TX,
 			  ucontrol->value.integer.value[0]);
-	msm_afe_lb_vol_ctrl = ucontrol->value.integer.value[0];
+	msm_afe_tert_mi2s_lb_vol_ctrl = ucontrol->value.integer.value[0];
+	return 0;
+}
+
+static int msm_qti_pp_get_icc_vol_mixer(struct snd_kcontrol *kcontrol,
+				       struct snd_ctl_elem_value *ucontrol)
+{
+	ucontrol->value.integer.value[0] = msm_route_icc_vol_control;
+	return 0;
+}
+
+static int msm_qti_pp_set_icc_vol_mixer(struct snd_kcontrol *kcontrol,
+			    struct snd_ctl_elem_value *ucontrol)
+{
+	adm_set_mic_gain(AFE_PORT_ID_QUATERNARY_TDM_TX,
+		adm_get_default_copp_idx(AFE_PORT_ID_QUATERNARY_TDM_TX),
+		ucontrol->value.integer.value[0]);
+	msm_route_icc_vol_control = ucontrol->value.integer.value[0];
 	return 0;
 }
 
 static int msm_qti_pp_get_quat_mi2s_fm_vol_mixer(struct snd_kcontrol *kcontrol,
 				       struct snd_ctl_elem_value *ucontrol)
 {
-	ucontrol->value.integer.value[0] = msm_route_fm_vol_control;
+	ucontrol->value.integer.value[0] = msm_afe_quat_mi2s_lb_vol_ctrl;
 	return 0;
 }
 
@@ -459,7 +502,7 @@ static int msm_qti_pp_set_quat_mi2s_fm_vol_mixer(struct snd_kcontrol *kcontrol,
 	afe_loopback_gain(AFE_PORT_ID_QUATERNARY_MI2S_TX,
 			  ucontrol->value.integer.value[0]);
 
-	msm_route_fm_vol_control = ucontrol->value.integer.value[0];
+	msm_afe_quat_mi2s_lb_vol_ctrl = ucontrol->value.integer.value[0];
 
 	return 0;
 }
@@ -532,7 +575,7 @@ static int msm_qti_pp_set_sec_auxpcm_lb_vol_mixer(
 static int msm_qti_pp_get_channel_map_mixer(struct snd_kcontrol *kcontrol,
 					    struct snd_ctl_elem_value *ucontrol)
 {
-	char channel_map[PCM_FORMAT_MAX_NUM_CHANNEL];
+	char channel_map[PCM_FORMAT_MAX_NUM_CHANNEL] = {0};
 	int i;
 
 	adm_get_multi_ch_map(channel_map, ADM_PATH_PLAYBACK);
@@ -550,6 +593,32 @@ static int msm_qti_pp_put_channel_map_mixer(struct snd_kcontrol *kcontrol,
 	for (i = 0; i < PCM_FORMAT_MAX_NUM_CHANNEL; i++)
 		channel_map[i] = (char)(ucontrol->value.integer.value[i]);
 	adm_set_multi_ch_map(channel_map, ADM_PATH_PLAYBACK);
+
+	return 0;
+}
+
+static int msm_qti_pp_get_channel_map_capture(struct snd_kcontrol *kcontrol,
+					    struct snd_ctl_elem_value *ucontrol)
+{
+	char channel_map[PCM_FORMAT_MAX_NUM_CHANNEL] = {0};
+	int i;
+
+	adm_get_multi_ch_map(channel_map, ADM_PATH_LIVE_REC);
+	for (i = 0; i < PCM_FORMAT_MAX_NUM_CHANNEL; i++)
+		ucontrol->value.integer.value[i] =
+			(unsigned int) channel_map[i];
+	return 0;
+}
+
+static int msm_qti_pp_put_channel_map_capture(struct snd_kcontrol *kcontrol,
+					    struct snd_ctl_elem_value *ucontrol)
+{
+	char channel_map[PCM_FORMAT_MAX_NUM_CHANNEL];
+	int i;
+
+	for (i = 0; i < PCM_FORMAT_MAX_NUM_CHANNEL; i++)
+		channel_map[i] = (char)(ucontrol->value.integer.value[i]);
+	adm_set_multi_ch_map(channel_map, ADM_PATH_LIVE_REC);
 
 	return 0;
 }
@@ -721,6 +790,43 @@ static int msm_qti_pp_asphere_set(struct snd_kcontrol *kcontrol,
 	return 0;
 }
 
+static int msm_multichannel_ec_primary_mic_ch_put(struct snd_kcontrol *kcontrol,
+			struct snd_ctl_elem_value *ucontrol)
+{
+	int ret = 0;
+	int copp_idx = 0;
+	int port_id = AFE_PORT_ID_QUATERNARY_TDM_TX;
+
+	msm_multichannel_ec_primary_mic_ch = ucontrol->value.integer.value[0];
+	pr_debug("%s: msm_multichannel_ec_primary_mic_ch = %u\n",
+		__func__, msm_multichannel_ec_primary_mic_ch);
+	copp_idx = adm_get_default_copp_idx(port_id);
+	if ((copp_idx < 0) || (copp_idx > MAX_COPPS_PER_PORT)) {
+		pr_err("%s : no active copp to query multichannel ec copp_idx: %u\n",
+			__func__, copp_idx);
+		return -EINVAL;
+	}
+	adm_send_set_multichannel_ec_primary_mic_ch(port_id, copp_idx,
+		msm_multichannel_ec_primary_mic_ch);
+
+	return ret;
+}
+
+static int msm_multichannel_ec_primary_mic_ch_get(struct snd_kcontrol *kcontrol,
+			struct snd_ctl_elem_value *ucontrol)
+{
+	ucontrol->value.integer.value[0] = msm_multichannel_ec_primary_mic_ch;
+	pr_debug("%s: msm_multichannel_ec_primary_mic_ch = %lu\n",
+		__func__, ucontrol->value.integer.value[0]);
+	return 0;
+}
+
+static const struct  snd_kcontrol_new msm_multichannel_ec_controls[] = {
+	SOC_SINGLE_EXT("Multichannel EC Primary Mic Ch", SND_SOC_NOPM, 0,
+		0xFFFFFFFF, 0, msm_multichannel_ec_primary_mic_ch_get,
+		msm_multichannel_ec_primary_mic_ch_put),
+};
+
 static const struct snd_kcontrol_new int_fm_vol_mixer_controls[] = {
 	SOC_SINGLE_EXT_TLV("Internal FM RX Volume", SND_SOC_NOPM, 0,
 	INT_RX_VOL_GAIN, 0, msm_qti_pp_get_fm_vol_mixer,
@@ -736,6 +842,12 @@ static const struct snd_kcontrol_new pri_mi2s_lb_vol_mixer_controls[] = {
 	msm_qti_pp_set_pri_mi2s_lb_vol_mixer, afe_lb_vol_gain),
 };
 
+static const struct snd_kcontrol_new sec_mi2s_lb_vol_mixer_controls[] = {
+	SOC_SINGLE_EXT_TLV("SEC MI2S LOOPBACK Volume", SND_SOC_NOPM, 0,
+	INT_RX_VOL_GAIN, 0, msm_qti_pp_get_sec_mi2s_lb_vol_mixer,
+	msm_qti_pp_set_sec_mi2s_lb_vol_mixer, afe_lb_vol_gain),
+};
+
 static const struct snd_kcontrol_new tert_mi2s_lb_vol_mixer_controls[] = {
 	SOC_SINGLE_EXT_TLV("Tert MI2S LOOPBACK Volume", SND_SOC_NOPM, 0,
 	INT_RX_VOL_GAIN, 0, msm_qti_pp_get_tert_mi2s_lb_vol_mixer,
@@ -746,6 +858,12 @@ static const struct snd_kcontrol_new int_hfp_vol_mixer_controls[] = {
 	SOC_SINGLE_EXT_TLV("Internal HFP RX Volume", SND_SOC_NOPM, 0,
 	INT_RX_VOL_GAIN, 0, msm_qti_pp_get_hfp_vol_mixer,
 	msm_qti_pp_set_hfp_vol_mixer, hfp_rx_vol_gain),
+};
+
+static const struct snd_kcontrol_new int_icc_vol_mixer_controls[] = {
+	SOC_SINGLE_EXT_TLV("Internal ICC Volume", SND_SOC_NOPM, 0,
+	INT_RX_VOL_GAIN, 0, msm_qti_pp_get_icc_vol_mixer,
+	msm_qti_pp_set_icc_vol_mixer, icc_rx_vol_gain),
 };
 
 static const struct snd_kcontrol_new pri_auxpcm_lb_vol_mixer_controls[] = {
@@ -770,6 +888,11 @@ static const struct snd_kcontrol_new multi_ch_channel_map_mixer_controls[] = {
 	msm_qti_pp_put_channel_map_mixer),
 };
 
+static const struct snd_kcontrol_new multi_ch_channel_map_capture_controls[] = {
+	SOC_SINGLE_MULTI_EXT("Capture Device Channel Map", SND_SOC_NOPM, 0, 16,
+	0, PCM_FORMAT_MAX_NUM_CHANNEL, msm_qti_pp_get_channel_map_capture,
+	msm_qti_pp_put_channel_map_capture),
+};
 
 static const struct snd_kcontrol_new get_rms_controls[] = {
 	SOC_SINGLE_EXT("Get RMS", SND_SOC_NOPM, 0, 0xFFFFFFFF,
@@ -927,11 +1050,17 @@ void msm_qti_pp_add_controls(struct snd_soc_platform *platform)
 	snd_soc_add_platform_controls(platform, pri_mi2s_lb_vol_mixer_controls,
 			ARRAY_SIZE(pri_mi2s_lb_vol_mixer_controls));
 
+	snd_soc_add_platform_controls(platform, sec_mi2s_lb_vol_mixer_controls,
+			ARRAY_SIZE(sec_mi2s_lb_vol_mixer_controls));
+
 	snd_soc_add_platform_controls(platform, tert_mi2s_lb_vol_mixer_controls,
 			ARRAY_SIZE(tert_mi2s_lb_vol_mixer_controls));
 
 	snd_soc_add_platform_controls(platform, int_hfp_vol_mixer_controls,
 			ARRAY_SIZE(int_hfp_vol_mixer_controls));
+
+	snd_soc_add_platform_controls(platform, int_icc_vol_mixer_controls,
+			ARRAY_SIZE(int_icc_vol_mixer_controls));
 
 	snd_soc_add_platform_controls(platform,
 			pri_auxpcm_lb_vol_mixer_controls,
@@ -944,6 +1073,10 @@ void msm_qti_pp_add_controls(struct snd_soc_platform *platform)
 	snd_soc_add_platform_controls(platform,
 				multi_ch_channel_map_mixer_controls,
 			ARRAY_SIZE(multi_ch_channel_map_mixer_controls));
+
+	snd_soc_add_platform_controls(platform,
+				multi_ch_channel_map_capture_controls,
+			ARRAY_SIZE(multi_ch_channel_map_capture_controls));
 
 	snd_soc_add_platform_controls(platform, get_rms_controls,
 			ARRAY_SIZE(get_rms_controls));
@@ -959,4 +1092,7 @@ void msm_qti_pp_add_controls(struct snd_soc_platform *platform)
 
 	snd_soc_add_platform_controls(platform, asphere_mixer_controls,
 			ARRAY_SIZE(asphere_mixer_controls));
+
+	snd_soc_add_platform_controls(platform, msm_multichannel_ec_controls,
+			ARRAY_SIZE(msm_multichannel_ec_controls));
 }

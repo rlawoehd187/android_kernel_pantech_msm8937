@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2014, 2016 The Linux Foundation. All rights reserved.
+/* Copyright (c) 2010-2014, 2016, 2018 The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -276,6 +276,7 @@ int apr_send_pkt(void *handle, uint32_t *buf)
 	uint16_t dest_id;
 	uint16_t client_id;
 	uint16_t w_len;
+	int rc;
 	unsigned long flags;
 
 	if (!handle || !buf) {
@@ -283,17 +284,17 @@ int apr_send_pkt(void *handle, uint32_t *buf)
 		return -EINVAL;
 	}
 	if (svc->need_reset) {
-		pr_err("apr: send_pkt service need reset\n");
+		pr_err_ratelimited("apr: send_pkt service need reset\n");
 		return -ENETRESET;
 	}
 
 	if ((svc->dest_id == APR_DEST_QDSP6) &&
 	    (apr_get_q6_state() != APR_SUBSYS_LOADED)) {
-		pr_err("%s: Still dsp is not Up\n", __func__);
+		pr_err_ratelimited("%s: Still dsp is not Up\n", __func__);
 		return -ENETRESET;
 	} else if ((svc->dest_id == APR_DEST_MODEM) &&
 		   (apr_get_modem_state() == APR_SUBSYS_DOWN)) {
-		pr_err("apr: Still Modem is not Up\n");
+		pr_err_ratelimited("apr: Still Modem is not Up\n");
 		return -ENETRESET;
 	}
 
@@ -303,7 +304,7 @@ int apr_send_pkt(void *handle, uint32_t *buf)
 	clnt = &client[dest_id][client_id];
 
 	if (!client[dest_id][client_id].handle) {
-		pr_err("APR: Still service is not yet opened\n");
+		pr_err_ratelimited("APR: Still service is not yet opened\n");
 		spin_unlock_irqrestore(&svc->w_lock, flags);
 		return -EINVAL;
 	}
@@ -317,14 +318,23 @@ int apr_send_pkt(void *handle, uint32_t *buf)
 	APR_PKT_INFO("Tx: dest_svc[%d], opcode[0x%X], size[%d]",
 			hdr->dest_svc, hdr->opcode, hdr->pkt_size);
 
-	w_len = apr_tal_write(clnt->handle, buf,
+	rc = apr_tal_write(clnt->handle, buf,
 			(struct apr_pkt_priv *)&svc->pkt_owner,
 			hdr->pkt_size);
-	if (w_len != hdr->pkt_size)
-		pr_err("Unable to write APR pkt successfully: %d\n", w_len);
+	if (rc >= 0) {
+		w_len = rc;
+		if (w_len != hdr->pkt_size) {
+			pr_err("%s: Unable to write whole APR pkt successfully: %d\n",
+			       __func__, rc);
+			rc = -EINVAL;
+		}
+	} else {
+		pr_err("%s: Write APR pkt failed with error %d\n",
+			__func__, rc);
+	}
 	spin_unlock_irqrestore(&svc->w_lock, flags);
 
-	return w_len;
+	return rc;
 }
 
 int apr_pkt_config(void *handle, struct apr_pkt_cfg *cfg)
@@ -388,14 +398,14 @@ struct apr_svc *apr_register(char *dest, char *svc_name, apr_fn svc_fn,
 
 	if (dest_id == APR_DEST_QDSP6) {
 		if (apr_get_q6_state() != APR_SUBSYS_LOADED) {
-			pr_err("%s: adsp not up\n", __func__);
+			pr_err_ratelimited("%s: adsp not up\n", __func__);
 			return NULL;
 		}
 		pr_debug("%s: adsp Up\n", __func__);
 	} else if (dest_id == APR_DEST_MODEM) {
 		if (apr_get_modem_state() == APR_SUBSYS_DOWN) {
 			if (is_modem_up) {
-				pr_err("%s: modem shutdown due to SSR, ret",
+				pr_err_ratelimited("%s: modem shutdown due to SSR, ret",
 					__func__);
 				return NULL;
 			}
@@ -410,7 +420,7 @@ struct apr_svc *apr_register(char *dest, char *svc_name, apr_fn svc_fn,
 	}
 
 	if (apr_get_svc(svc_name, domain_id, &client_id, &svc_idx, &svc_id)) {
-		pr_err("%s: apr_get_svc failed\n", __func__);
+		pr_err_ratelimited("%s: apr_get_svc failed\n", __func__);
 		goto done;
 	}
 
@@ -421,7 +431,7 @@ struct apr_svc *apr_register(char *dest, char *svc_name, apr_fn svc_fn,
 				APR_DL_SMD, apr_cb_func, NULL);
 		if (!clnt->handle) {
 			svc = NULL;
-			pr_err("APR: Unable to open handle\n");
+			pr_err_ratelimited("APR: Unable to open handle\n");
 			mutex_unlock(&clnt->m_lock);
 			goto done;
 		}
@@ -432,7 +442,7 @@ struct apr_svc *apr_register(char *dest, char *svc_name, apr_fn svc_fn,
 	clnt->id = client_id;
 	if (svc->need_reset) {
 		mutex_unlock(&svc->m_lock);
-		pr_err("APR: Service needs reset\n");
+		pr_err_ratelimited("APR: Service needs reset\n");
 		goto done;
 	}
 	svc->id = svc_id;
@@ -496,7 +506,7 @@ void apr_cb_func(void *buf, int len, void *priv)
 	pr_debug("\n*****************\n");
 
 	if (!buf || len <= APR_HDR_SIZE) {
-		pr_err("APR: Improper apr pkt received:%p %d\n", buf, len);
+		pr_err("APR: Improper apr pkt received:%pK %d\n", buf, len);
 		return;
 	}
 	hdr = buf;
@@ -521,6 +531,12 @@ void apr_cb_func(void *buf, int len, void *priv)
 		pr_err("APR: Wrong paket size\n");
 		return;
 	}
+
+	if (hdr->pkt_size < hdr_size) {
+		pr_err("APR: Packet size less than header size\n");
+		return;
+	}
+
 	msg_type = hdr->hdr_field;
 	msg_type = (msg_type >> 0x08) & 0x0003;
 	if (msg_type >= APR_MSG_TYPE_MAX && msg_type != APR_BASIC_RSP_RESULT) {
@@ -584,7 +600,7 @@ void apr_cb_func(void *buf, int len, void *priv)
 		return;
 	}
 	pr_debug("svc_idx = %d\n", i);
-	pr_debug("%x %x %x %p %p\n", c_svc->id, c_svc->dest_id,
+	pr_debug("%x %x %x %pK %pK\n", c_svc->id, c_svc->dest_id,
 		 c_svc->client_id, c_svc->fn, c_svc->priv);
 	data.payload_size = hdr->pkt_size - hdr_size;
 	data.opcode = hdr->opcode;
@@ -598,7 +614,8 @@ void apr_cb_func(void *buf, int len, void *priv)
 
 	temp_port = ((data.dest_port >> 8) * 8) + (data.dest_port & 0xFF);
 	pr_debug("port = %d t_port = %d\n", data.src_port, temp_port);
-	if (c_svc->port_cnt && c_svc->port_fn[temp_port])
+	if (((temp_port >= 0) && (temp_port < APR_MAX_PORTS))
+		&& (c_svc->port_cnt && c_svc->port_fn[temp_port]))
 		c_svc->port_fn[temp_port](&data,  c_svc->port_priv[temp_port]);
 	else if (c_svc->fn)
 		c_svc->fn(&data, c_svc->priv);
@@ -648,7 +665,7 @@ static void apr_reset_deregister(struct work_struct *work)
 			container_of(work, struct apr_reset_work, work);
 
 	handle = apr_reset->handle;
-	pr_debug("%s:handle[%p]\n", __func__, handle);
+	pr_debug("%s:handle[%pK]\n", __func__, handle);
 	apr_deregister(handle);
 	kfree(apr_reset);
 }
@@ -681,7 +698,7 @@ int apr_deregister(void *handle)
 		client[dest_id][client_id].svc_cnt--;
 		if (!client[dest_id][client_id].svc_cnt) {
 			svc->need_reset = 0x0;
-			pr_debug("%s: service is reset %p\n", __func__, svc);
+			pr_debug("%s: service is reset %pK\n", __func__, svc);
 		}
 	}
 
@@ -709,7 +726,7 @@ void apr_reset(void *handle)
 
 	if (!handle)
 		return;
-	pr_debug("%s: handle[%p]\n", __func__, handle);
+	pr_debug("%s: handle[%pK]\n", __func__, handle);
 
 	if (apr_reset_workqueue == NULL) {
 		pr_err("%s: apr_reset_workqueue is NULL\n", __func__);
@@ -738,6 +755,7 @@ void dispatch_event(unsigned long code, uint16_t proc)
 	uint16_t clnt;
 	int i, j;
 
+	memset(&data, 0, sizeof(data));
 	data.opcode = RESET_EVENTS;
 	data.reset_event = code;
 
@@ -880,6 +898,7 @@ static int lpass_notifier_cb(struct notifier_block *this, unsigned long code,
 }
 
 static struct notifier_block lnb = {
+	.priority = 0,
 	.notifier_call = lpass_notifier_cb,
 };
 

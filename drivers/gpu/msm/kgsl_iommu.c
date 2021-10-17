@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2016, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2011-2020, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -20,6 +20,7 @@
 #include <linux/msm_kgsl.h>
 #include <linux/ratelimit.h>
 #include <linux/of_platform.h>
+#include <linux/random.h>
 #include <soc/qcom/scm.h>
 #include <soc/qcom/secure_buffer.h>
 #include <stddef.h>
@@ -37,6 +38,11 @@
 #include "kgsl_pwrctrl.h"
 
 #define _IOMMU_PRIV(_mmu) (&((_mmu)->priv.iommu))
+
+#define ADDR_IN_GLOBAL(_mmu, _a) \
+	(((_a) >= KGSL_IOMMU_GLOBAL_MEM_BASE(_mmu)) && \
+	 ((_a) < (KGSL_IOMMU_GLOBAL_MEM_BASE(_mmu) + \
+	 KGSL_IOMMU_GLOBAL_MEM_SIZE)))
 
 static struct kgsl_mmu_pt_ops iommu_pt_ops;
 static bool need_iommu_sync;
@@ -79,30 +85,49 @@ static struct kmem_cache *addr_entry_cache;
  *
  * Here we define an array and a simple allocator to keep track of the currently
  * active global entries. Each entry is assigned a unique address inside of a
- * MMU implementation specific "global" region. The addresses are assigned
- * sequentially and never re-used to avoid having to go back and reprogram
- * existing pagetables. The entire list of active entries are mapped and
- * unmapped into every new pagetable as it is created and destroyed.
- *
- * Because there are relatively few entries and they are defined at boot time we
- * don't need to go over the top to define a dynamic allocation scheme. It will
- * be less wasteful to pick a static number with a little bit of growth
- * potential.
+ * MMU implementation specific "global" region. We use a simple bitmap based
+ * allocator for the region to allow for both fixed and dynamic addressing.
  */
 
 #define GLOBAL_PT_ENTRIES 32
 
-static struct kgsl_memdesc *global_pt_entries[GLOBAL_PT_ENTRIES];
+struct global_pt_entry {
+	struct kgsl_memdesc *memdesc;
+	char name[32];
+};
+
+#define GLOBAL_MAP_PAGES (KGSL_IOMMU_GLOBAL_MEM_SIZE >> PAGE_SHIFT)
+
+static struct global_pt_entry global_pt_entries[GLOBAL_PT_ENTRIES];
+static struct kgsl_memdesc *kgsl_global_secure_pt_entry;
+static DECLARE_BITMAP(global_map, GLOBAL_MAP_PAGES);
 static int global_pt_count;
-uint64_t global_pt_alloc;
+static struct kgsl_memdesc gpu_qdss_desc;
+
+void kgsl_print_global_pt_entries(struct seq_file *s)
+{
+	int i;
+
+	for (i = 0; i < global_pt_count; i++) {
+		struct kgsl_memdesc *memdesc = global_pt_entries[i].memdesc;
+
+		if (memdesc == NULL)
+			continue;
+
+		seq_printf(s, "0x%16.16llX-0x%16.16llX %16llu %s\n",
+			memdesc->gpuaddr, memdesc->gpuaddr + memdesc->size - 1,
+			memdesc->size, global_pt_entries[i].name);
+	}
+}
 
 static void kgsl_iommu_unmap_globals(struct kgsl_pagetable *pagetable)
 {
 	unsigned int i;
 
 	for (i = 0; i < global_pt_count; i++) {
-		if (global_pt_entries[i] != NULL)
-			kgsl_mmu_unmap(pagetable, global_pt_entries[i]);
+		if (global_pt_entries[i].memdesc != NULL)
+			kgsl_mmu_unmap(pagetable,
+					global_pt_entries[i].memdesc);
 	}
 }
 
@@ -111,11 +136,34 @@ static void kgsl_iommu_map_globals(struct kgsl_pagetable *pagetable)
 	unsigned int i;
 
 	for (i = 0; i < global_pt_count; i++) {
-		if (global_pt_entries[i] != NULL) {
-			int ret = kgsl_mmu_map(pagetable, global_pt_entries[i]);
+		if (global_pt_entries[i].memdesc != NULL) {
+			int ret = kgsl_mmu_map(pagetable,
+					global_pt_entries[i].memdesc);
 
 			BUG_ON(ret);
 		}
+	}
+}
+
+static void kgsl_iommu_unmap_global_secure_pt_entry(struct kgsl_pagetable
+								*pagetable)
+{
+	struct kgsl_memdesc *entry = kgsl_global_secure_pt_entry;
+
+	if (entry != NULL)
+		kgsl_mmu_unmap(pagetable, entry);
+
+}
+
+static void kgsl_map_global_secure_pt_entry(struct kgsl_pagetable *pagetable)
+{
+	int ret;
+	struct kgsl_memdesc *entry = kgsl_global_secure_pt_entry;
+
+	if (entry != NULL) {
+		entry->pagetable = pagetable;
+		ret = kgsl_mmu_map(pagetable, entry);
+		BUG_ON(ret);
 	}
 }
 
@@ -128,30 +176,120 @@ static void kgsl_iommu_remove_global(struct kgsl_mmu *mmu,
 		return;
 
 	for (i = 0; i < global_pt_count; i++) {
-		if (global_pt_entries[i] == memdesc) {
+		if (global_pt_entries[i].memdesc == memdesc) {
+			u64 offset = memdesc->gpuaddr -
+				KGSL_IOMMU_GLOBAL_MEM_BASE(mmu);
+
+			bitmap_clear(global_map, offset >> PAGE_SHIFT,
+				kgsl_memdesc_footprint(memdesc) >> PAGE_SHIFT);
+
 			memdesc->gpuaddr = 0;
 			memdesc->priv &= ~KGSL_MEMDESC_GLOBAL;
-			global_pt_entries[i] = NULL;
+			global_pt_entries[i].memdesc = NULL;
 			return;
 		}
 	}
 }
 
 static void kgsl_iommu_add_global(struct kgsl_mmu *mmu,
-		struct kgsl_memdesc *memdesc)
+		struct kgsl_memdesc *memdesc, const char *name)
 {
+	u32 bit, start = 0;
+	u64 size = kgsl_memdesc_footprint(memdesc);
+
 	if (memdesc->gpuaddr != 0)
 		return;
 
-	BUG_ON(global_pt_count >= GLOBAL_PT_ENTRIES);
-	BUG_ON((global_pt_alloc + memdesc->size) >= KGSL_IOMMU_GLOBAL_MEM_SIZE);
+	if (WARN_ON(global_pt_count >= GLOBAL_PT_ENTRIES))
+		return;
 
-	memdesc->gpuaddr = KGSL_IOMMU_GLOBAL_MEM_BASE + global_pt_alloc;
+	if (WARN_ON(size > KGSL_IOMMU_GLOBAL_MEM_SIZE))
+		return;
+
+	if (memdesc->priv & KGSL_MEMDESC_RANDOM) {
+		u32 range = GLOBAL_MAP_PAGES - (size >> PAGE_SHIFT);
+
+		start = get_random_int() % range;
+	}
+
+	while (start >= 0) {
+		bit = bitmap_find_next_zero_area(global_map, GLOBAL_MAP_PAGES,
+			start, size >> PAGE_SHIFT, 0);
+
+		if (bit < GLOBAL_MAP_PAGES)
+			break;
+
+		start--;
+	}
+
+	if (WARN_ON(start < 0))
+		return;
+
+	memdesc->gpuaddr =
+		KGSL_IOMMU_GLOBAL_MEM_BASE(mmu) + (bit << PAGE_SHIFT);
+
+	bitmap_set(global_map, bit, size >> PAGE_SHIFT);
+
 	memdesc->priv |= KGSL_MEMDESC_GLOBAL;
-	global_pt_alloc += memdesc->size;
 
-	global_pt_entries[global_pt_count++] = memdesc;
+	global_pt_entries[global_pt_count].memdesc = memdesc;
+	strlcpy(global_pt_entries[global_pt_count].name, name,
+			sizeof(global_pt_entries[global_pt_count].name));
+	global_pt_count++;
 }
+
+void kgsl_add_global_secure_entry(struct kgsl_device *device,
+					struct kgsl_memdesc *memdesc)
+{
+	memdesc->gpuaddr = KGSL_IOMMU_SECURE_BASE(&device->mmu);
+	kgsl_global_secure_pt_entry = memdesc;
+}
+
+struct kgsl_memdesc *kgsl_iommu_get_qdss_global_entry(void)
+{
+	return &gpu_qdss_desc;
+}
+
+static void kgsl_setup_qdss_desc(struct kgsl_device *device)
+{
+	int result = 0;
+	uint32_t gpu_qdss_entry[2];
+
+	if (!of_find_property(device->pdev->dev.of_node,
+		"qcom,gpu-qdss-stm", NULL))
+		return;
+
+	if (of_property_read_u32_array(device->pdev->dev.of_node,
+				"qcom,gpu-qdss-stm", gpu_qdss_entry, 2)) {
+		KGSL_CORE_ERR("Failed to read gpu qdss dts entry\n");
+		return;
+	}
+
+	gpu_qdss_desc.flags = 0;
+	gpu_qdss_desc.priv = 0;
+	gpu_qdss_desc.physaddr = gpu_qdss_entry[0];
+	gpu_qdss_desc.size = gpu_qdss_entry[1];
+	gpu_qdss_desc.pagetable = NULL;
+	gpu_qdss_desc.ops = NULL;
+	gpu_qdss_desc.dev = device->dev->parent;
+	gpu_qdss_desc.hostptr = NULL;
+
+	result = memdesc_sg_dma(&gpu_qdss_desc, gpu_qdss_desc.physaddr,
+			gpu_qdss_desc.size);
+	if (result) {
+		KGSL_CORE_ERR("memdesc_sg_dma failed: %d\n", result);
+		return;
+	}
+
+	kgsl_mmu_add_global(device, &gpu_qdss_desc, "gpu-qdss");
+}
+
+static inline void kgsl_cleanup_qdss_desc(struct kgsl_mmu *mmu)
+{
+	kgsl_iommu_remove_global(mmu, &gpu_qdss_desc);
+	kgsl_sharedmem_free(&gpu_qdss_desc);
+}
+
 
 static inline void _iommu_sync_mmu_pc(bool lock)
 {
@@ -189,16 +327,15 @@ static int _attach_pt(struct kgsl_iommu_pt *iommu_pt,
 
 	if (ret == 0)
 		iommu_pt->attached = true;
-	else
-		KGSL_CORE_ERR("iommu_attach_device(%s) failed: %d\n",
-				ctx->name, ret);
 
 	return ret;
 }
 
-static int _lock_if_secure_mmu(struct kgsl_device *device,
-		struct kgsl_memdesc *memdesc, struct kgsl_mmu *mmu)
+static int _lock_if_secure_mmu(struct kgsl_memdesc *memdesc,
+		struct kgsl_mmu *mmu)
 {
+	struct kgsl_device *device = KGSL_MMU_DEVICE(mmu);
+
 	if (!kgsl_memdesc_is_secured(memdesc))
 		return 0;
 
@@ -214,9 +351,11 @@ static int _lock_if_secure_mmu(struct kgsl_device *device,
 	return 0;
 }
 
-static void _unlock_if_secure_mmu(struct kgsl_device *device,
-		struct kgsl_memdesc *memdesc, struct kgsl_mmu *mmu)
+static void _unlock_if_secure_mmu(struct kgsl_memdesc *memdesc,
+		struct kgsl_mmu *mmu)
 {
+	struct kgsl_device *device = KGSL_MMU_DEVICE(mmu);
+
 	if (!kgsl_memdesc_is_secured(memdesc) || !kgsl_mmu_is_secured(mmu))
 		return;
 
@@ -229,11 +368,10 @@ static int _iommu_map_sync_pc(struct kgsl_pagetable *pt,
 		uint64_t gpuaddr, phys_addr_t physaddr,
 		uint64_t size, unsigned int flags)
 {
-	struct kgsl_device *device = KGSL_MMU_DEVICE(pt->mmu);
 	struct kgsl_iommu_pt *iommu_pt = pt->priv;
 	int ret;
 
-	ret = _lock_if_secure_mmu(device, memdesc, pt->mmu);
+	ret = _lock_if_secure_mmu(memdesc, pt->mmu);
 	if (ret)
 		return ret;
 
@@ -243,7 +381,7 @@ static int _iommu_map_sync_pc(struct kgsl_pagetable *pt,
 
 	_iommu_sync_mmu_pc(false);
 
-	_unlock_if_secure_mmu(device, memdesc, pt->mmu);
+	_unlock_if_secure_mmu(memdesc, pt->mmu);
 
 	if (ret) {
 		KGSL_CORE_ERR("map err: 0x%016llX, 0x%llx, 0x%x, %d\n",
@@ -257,12 +395,11 @@ static int _iommu_map_sync_pc(struct kgsl_pagetable *pt,
 static int _iommu_unmap_sync_pc(struct kgsl_pagetable *pt,
 		struct kgsl_memdesc *memdesc, uint64_t addr, uint64_t size)
 {
-	struct kgsl_device *device = KGSL_MMU_DEVICE(pt->mmu);
 	struct kgsl_iommu_pt *iommu_pt = pt->priv;
-	size_t unmapped;
+	size_t unmapped = 0;
 	int ret;
 
-	ret = _lock_if_secure_mmu(device, memdesc, pt->mmu);
+	ret = _lock_if_secure_mmu(memdesc, pt->mmu);
 	if (ret)
 		return ret;
 
@@ -272,7 +409,7 @@ static int _iommu_unmap_sync_pc(struct kgsl_pagetable *pt,
 
 	_iommu_sync_mmu_pc(false);
 
-	_unlock_if_secure_mmu(device, memdesc, pt->mmu);
+	_unlock_if_secure_mmu(memdesc, pt->mmu);
 
 	if (unmapped != size) {
 		KGSL_CORE_ERR("unmap err: 0x%016llx, 0x%llx, %zd\n",
@@ -283,31 +420,100 @@ static int _iommu_unmap_sync_pc(struct kgsl_pagetable *pt,
 	return 0;
 }
 
-static int _iommu_map_sg_sync_pc(struct kgsl_pagetable *pt,
+static int _iommu_map_sg_offset_sync_pc(struct kgsl_pagetable *pt,
 		uint64_t addr, struct kgsl_memdesc *memdesc,
-		unsigned int flags)
+		struct scatterlist *sg, int nents,
+		uint64_t offset, uint64_t size, unsigned int flags)
 {
-	struct kgsl_device *device = KGSL_MMU_DEVICE(pt->mmu);
 	struct kgsl_iommu_pt *iommu_pt = pt->priv;
-	size_t mapped;
+	uint64_t offset_tmp = offset;
+	uint64_t size_tmp = size;
+	size_t mapped = 0;
+	unsigned int i;
+	struct scatterlist *s;
+	phys_addr_t physaddr;
 	int ret;
 
-	ret = _lock_if_secure_mmu(device, memdesc, pt->mmu);
+	ret = _lock_if_secure_mmu(memdesc, pt->mmu);
 	if (ret)
 		return ret;
 
 	_iommu_sync_mmu_pc(true);
 
-	mapped = iommu_map_sg(iommu_pt->domain, addr, memdesc->sgt->sgl,
-			memdesc->sgt->nents, flags);
+	for_each_sg(sg, s, nents, i) {
+		/* Iterate until we find the offset */
+		if (offset_tmp >= s->length) {
+			offset_tmp -= s->length;
+			continue;
+		}
+
+		/* How much mapping is needed in this sg? */
+		if (size < s->length - offset_tmp)
+			size_tmp = size;
+		else
+			size_tmp = s->length - offset_tmp;
+
+		/* Get the phys addr for the offset page */
+		if (offset_tmp != 0) {
+			physaddr = page_to_phys(nth_page(sg_page(s),
+					offset_tmp >> PAGE_SHIFT));
+			/* Reset offset_tmp */
+			offset_tmp = 0;
+		} else
+			physaddr = page_to_phys(sg_page(s));
+
+		/* Do the map for this sg */
+		ret = iommu_map(iommu_pt->domain, addr + mapped,
+				physaddr, size_tmp, flags);
+		if (ret)
+			break;
+
+		mapped += size_tmp;
+		size -= size_tmp;
+
+		if (size == 0)
+			break;
+	}
 
 	_iommu_sync_mmu_pc(false);
 
-	_unlock_if_secure_mmu(device, memdesc, pt->mmu);
+	_unlock_if_secure_mmu(memdesc, pt->mmu);
+
+	if (size != 0) {
+		/* Cleanup on error */
+		_iommu_unmap_sync_pc(pt, memdesc, addr, mapped);
+		KGSL_CORE_ERR("map err: 0x%016llX, %d, %x, %zd\n",
+			addr, nents, flags, mapped);
+		return  -ENODEV;
+	}
+
+	return 0;
+}
+
+static int _iommu_map_sg_sync_pc(struct kgsl_pagetable *pt,
+		uint64_t addr, struct kgsl_memdesc *memdesc,
+		struct scatterlist *sg, int nents,
+		unsigned int flags)
+{
+	struct kgsl_iommu_pt *iommu_pt = pt->priv;
+	size_t mapped;
+	int ret;
+
+	ret = _lock_if_secure_mmu(memdesc, pt->mmu);
+	if (ret)
+		return ret;
+
+	_iommu_sync_mmu_pc(true);
+
+	mapped = iommu_map_sg(iommu_pt->domain, addr, sg, nents, flags);
+
+	_iommu_sync_mmu_pc(false);
+
+	_unlock_if_secure_mmu(memdesc, pt->mmu);
 
 	if (mapped == 0) {
 		KGSL_CORE_ERR("map err: 0x%016llX, %d, %x, %zd\n",
-			addr, memdesc->sgt->nents, flags, mapped);
+			addr, nents, flags, mapped);
 		return  -ENODEV;
 	}
 
@@ -340,7 +546,61 @@ struct _mem_entry {
 	unsigned int priv;
 	int pending_free;
 	pid_t pid;
+	char name[32];
 };
+
+static void _get_global_entries(uint64_t faultaddr,
+		struct _mem_entry *prev,
+		struct _mem_entry *next)
+{
+	int i;
+	uint64_t prevaddr = 0;
+	struct global_pt_entry *p = NULL;
+
+	uint64_t nextaddr = (uint64_t) -1;
+	struct global_pt_entry *n = NULL;
+
+	for (i = 0; i < global_pt_count; i++) {
+		uint64_t addr;
+
+		if (global_pt_entries[i].memdesc == NULL)
+			continue;
+
+		addr = global_pt_entries[i].memdesc->gpuaddr;
+		if ((addr < faultaddr) && (addr > prevaddr)) {
+			prevaddr = addr;
+			p = &global_pt_entries[i];
+		}
+
+		if ((addr > faultaddr) && (addr < nextaddr)) {
+			nextaddr = addr;
+			n = &global_pt_entries[i];
+		}
+	}
+
+	if (p != NULL) {
+		prev->gpuaddr = p->memdesc->gpuaddr;
+		prev->size = p->memdesc->size;
+		prev->flags = p->memdesc->flags;
+		prev->priv = p->memdesc->priv;
+		prev->pid = 0;
+		strlcpy(prev->name, p->name, sizeof(prev->name));
+	}
+
+	if (n != NULL) {
+		next->gpuaddr = n->memdesc->gpuaddr;
+		next->size = n->memdesc->size;
+		next->flags = n->memdesc->flags;
+		next->priv = n->memdesc->priv;
+		next->pid = 0;
+		strlcpy(next->name, n->name, sizeof(next->name));
+	}
+}
+
+void __kgsl_get_memory_usage(struct _mem_entry *entry)
+{
+	kgsl_get_memory_usage(entry->name, sizeof(entry->name), entry->flags);
+}
 
 static void _get_entries(struct kgsl_process_private *private,
 		uint64_t faultaddr, struct _mem_entry *prev,
@@ -376,6 +636,7 @@ static void _get_entries(struct kgsl_process_private *private,
 		prev->priv = p->memdesc.priv;
 		prev->pending_free = p->pending_free;
 		prev->pid = private->pid;
+		__kgsl_get_memory_usage(prev);
 	}
 
 	if (n != NULL) {
@@ -385,15 +646,15 @@ static void _get_entries(struct kgsl_process_private *private,
 		next->priv = n->memdesc.priv;
 		next->pending_free = n->pending_free;
 		next->pid = private->pid;
+		__kgsl_get_memory_usage(next);
 	}
 }
 
 static void _find_mem_entries(struct kgsl_mmu *mmu, uint64_t faultaddr,
-	phys_addr_t ptbase, struct _mem_entry *preventry,
-	struct _mem_entry *nextentry)
+		struct _mem_entry *preventry, struct _mem_entry *nextentry,
+		struct kgsl_context *context)
 {
-	struct kgsl_process_private *private = NULL, *p;
-	int id = kgsl_mmu_get_ptname_from_ptbase(mmu, ptbase);
+	struct kgsl_process_private *private;
 
 	memset(preventry, 0, sizeof(*preventry));
 	memset(nextentry, 0, sizeof(*nextentry));
@@ -401,39 +662,25 @@ static void _find_mem_entries(struct kgsl_mmu *mmu, uint64_t faultaddr,
 	/* Set the maximum possible size as an initial value */
 	nextentry->gpuaddr = (uint64_t) -1;
 
-	mutex_lock(&kgsl_driver.process_mutex);
-	list_for_each_entry(p, &kgsl_driver.process_list, list) {
-		if (p->pagetable && (p->pagetable->name == id)) {
-			if (kgsl_process_private_get(p))
-				private = p;
-			break;
-		}
-	}
-	mutex_unlock(&kgsl_driver.process_mutex);
-
-	if (private != NULL) {
+	if (ADDR_IN_GLOBAL(mmu, faultaddr)) {
+		_get_global_entries(faultaddr, preventry, nextentry);
+	} else if (context) {
+		private = context->proc_priv;
 		spin_lock(&private->mem_lock);
 		_get_entries(private, faultaddr, preventry, nextentry);
 		spin_unlock(&private->mem_lock);
-
-		kgsl_process_private_put(private);
 	}
 }
 
 static void _print_entry(struct kgsl_device *device, struct _mem_entry *entry)
 {
-	char name[32];
-	memset(name, 0, sizeof(name));
-
-	kgsl_get_memory_usage(name, sizeof(name) - 1, entry->flags);
-
 	KGSL_LOG_DUMP(device,
 		"[%016llX - %016llX] %s %s (pid = %d) (%s)\n",
 		entry->gpuaddr,
 		entry->gpuaddr + entry->size,
 		entry->priv & KGSL_MEMDESC_GUARD_PAGE ? "(+guard)" : "",
 		entry->pending_free ? "(pending free)" : "",
-		entry->pid, name);
+		entry->pid, entry->name);
 }
 
 static void _check_if_freed(struct kgsl_iommu_context *ctx,
@@ -456,6 +703,48 @@ static void _check_if_freed(struct kgsl_iommu_context *ctx,
 	}
 }
 
+static bool
+kgsl_iommu_uche_overfetch(struct kgsl_process_private *private,
+		uint64_t faultaddr)
+{
+	int id;
+	struct kgsl_mem_entry *entry = NULL;
+
+	spin_lock(&private->mem_lock);
+	idr_for_each_entry(&private->mem_idr, entry, id) {
+		struct kgsl_memdesc *m = &entry->memdesc;
+
+		if ((faultaddr >= (m->gpuaddr + m->size))
+				&& (faultaddr < (m->gpuaddr + m->size + 64))) {
+			spin_unlock(&private->mem_lock);
+			return true;
+		}
+	}
+	spin_unlock(&private->mem_lock);
+	return false;
+}
+
+/*
+ * Read pagefaults where the faulting address lies within the first 64 bytes
+ * of a page (UCHE line size is 64 bytes) and the fault page is preceded by a
+ * valid allocation are considered likely due to UCHE overfetch and suppressed.
+ */
+
+static bool kgsl_iommu_suppress_pagefault(uint64_t faultaddr, int write,
+					struct kgsl_context *context)
+{
+	/*
+	 * If there is no context associated with the pagefault then this
+	 * could be a fault on a global buffer. We do not suppress faults
+	 * on global buffers as they are mainly accessed by the CP bypassing
+	 * the UCHE. Also, write pagefaults are never suppressed.
+	 */
+	if (!context || write)
+		return false;
+
+	return kgsl_iommu_uche_overfetch(context->proc_priv, faultaddr);
+}
+
 static int kgsl_iommu_fault_handler(struct iommu_domain *domain,
 	struct device *dev, unsigned long addr, int flags, void *token)
 {
@@ -466,6 +755,7 @@ static int kgsl_iommu_fault_handler(struct iommu_domain *domain,
 	struct kgsl_iommu_context *ctx;
 	u64 ptbase;
 	u32 contextidr;
+	pid_t tid = 0;
 	pid_t ptname;
 	struct _mem_entry prev, next;
 	int write;
@@ -503,12 +793,22 @@ static int kgsl_iommu_fault_handler(struct iommu_domain *domain,
 
 	context = kgsl_context_get(device, curr_context_id);
 
+	write = (flags & IOMMU_FAULT_WRITE) ? 1 : 0;
+	if (flags & IOMMU_FAULT_TRANSLATION)
+		fault_type = "translation";
+	else if (flags & IOMMU_FAULT_PERMISSION)
+		fault_type = "permission";
+
+	if (kgsl_iommu_suppress_pagefault(addr, write, context)) {
+		iommu->pagefault_suppression_count++;
+		kgsl_context_put(context);
+		return ret;
+	}
+
 	if (context != NULL) {
 		/* save pagefault timestamp for GFT */
 		set_bit(KGSL_CONTEXT_PRIV_PAGEFAULT, &context->priv);
-
-		kgsl_context_put(context);
-		context = NULL;
+		tid = context->tid;
 	}
 
 	ctx->fault = 1;
@@ -525,27 +825,39 @@ static int kgsl_iommu_fault_handler(struct iommu_domain *domain,
 		mutex_unlock(&device->mutex);
 	}
 
-	write = (flags & IOMMU_FAULT_WRITE) ? 1 : 0;
-	if (flags & IOMMU_FAULT_TRANSLATION)
-		fault_type = "translation";
-	else if (flags & IOMMU_FAULT_PERMISSION)
-		fault_type = "permission";
-
 	ptbase = KGSL_IOMMU_GET_CTX_REG_Q(ctx, TTBR0);
 	contextidr = KGSL_IOMMU_GET_CTX_REG(ctx, CONTEXTIDR);
 
-	ptname = kgsl_mmu_get_ptname_from_ptbase(mmu, ptbase);
+	ptname = MMU_FEATURE(mmu, KGSL_MMU_GLOBAL_PAGETABLE) ?
+		KGSL_MMU_GLOBAL_PT : tid;
+	/*
+	 * Trace needs to be logged before searching the faulting
+	 * address in free list as it takes quite long time in
+	 * search and delays the trace unnecessarily.
+	 */
+	trace_kgsl_mmu_pagefault(ctx->kgsldev, addr,
+			ptname, write ? "write" : "read");
 
 	if (test_bit(KGSL_FT_PAGEFAULT_LOG_ONE_PER_PAGE,
 		&adreno_dev->ft_pf_policy))
 		no_page_fault_log = kgsl_mmu_log_fault_addr(mmu, ptbase, addr);
 
 	if (!no_page_fault_log && __ratelimit(&_rs)) {
+		const char *api_str;
+
+		if (context != NULL) {
+			struct adreno_context *drawctxt =
+					ADRENO_CONTEXT(context);
+
+			api_str = get_api_type_str(drawctxt->type);
+		} else
+			api_str = "UNKNOWN";
+
 		KGSL_MEM_CRIT(ctx->kgsldev,
 			"GPU PAGE FAULT: addr = %lX pid= %d\n", addr, ptname);
 		KGSL_MEM_CRIT(ctx->kgsldev,
-			"context=%s TTBR0=0x%llx CIDR=0x%x (%s %s fault)\n",
-			ctx->name, ptbase, contextidr,
+			"context=%s ctx_type=%s TTBR0=0x%llx CIDR=0x%x (%s %s fault)\n",
+			ctx->name, api_str, ptbase, contextidr,
 			write ? "write" : "read", fault_type);
 
 		/* Don't print the debug if this is a permissions fault */
@@ -555,8 +867,7 @@ static int kgsl_iommu_fault_handler(struct iommu_domain *domain,
 			KGSL_LOG_DUMP(ctx->kgsldev,
 				"---- nearby memory ----\n");
 
-			_find_mem_entries(mmu, addr, ptbase, &prev, &next);
-
+			_find_mem_entries(mmu, addr, &prev, &next, context);
 			if (prev.gpuaddr)
 				_print_entry(ctx->kgsldev, &prev);
 			else
@@ -569,13 +880,9 @@ static int kgsl_iommu_fault_handler(struct iommu_domain *domain,
 				_print_entry(ctx->kgsldev, &next);
 			else
 				KGSL_LOG_DUMP(ctx->kgsldev, "*EMPTY*\n");
-
 		}
 	}
 
-	trace_kgsl_mmu_pagefault(ctx->kgsldev, addr,
-			kgsl_mmu_get_ptname_from_ptbase(mmu, ptbase),
-			write ? "write" : "read");
 
 	/*
 	 * We do not want the h/w to resume fetching data from an iommu
@@ -601,6 +908,7 @@ static int kgsl_iommu_fault_handler(struct iommu_domain *domain,
 		adreno_dispatcher_schedule(device);
 	}
 
+	kgsl_context_put(context);
 	return ret;
 }
 
@@ -707,8 +1015,10 @@ static void kgsl_iommu_destroy_pagetable(struct kgsl_pagetable *pt)
 
 	iommu = _IOMMU_PRIV(mmu);
 
-	if (KGSL_MMU_SECURE_PT == pt->name)
+	if (KGSL_MMU_SECURE_PT == pt->name) {
 		ctx = &iommu->ctx[KGSL_IOMMU_CONTEXT_SECURE];
+		kgsl_iommu_unmap_global_secure_pt_entry(pt);
+	}
 	else {
 		ctx = &iommu->ctx[KGSL_IOMMU_CONTEXT_USER];
 		kgsl_iommu_unmap_globals(pt);
@@ -729,14 +1039,17 @@ static void setup_64bit_pagetable(struct kgsl_mmu *mmu,
 		struct kgsl_pagetable *pagetable,
 		struct kgsl_iommu_pt *pt)
 {
+	unsigned int secure_global_size = kgsl_global_secure_pt_entry != NULL ?
+					kgsl_global_secure_pt_entry->size : 0;
 	if (mmu->secured && pagetable->name == KGSL_MMU_SECURE_PT) {
-		pt->compat_va_start = KGSL_IOMMU_SECURE_BASE;
-		pt->compat_va_end = KGSL_IOMMU_SECURE_END;
-		pt->va_start = KGSL_IOMMU_SECURE_BASE;
-		pt->va_end = KGSL_IOMMU_SECURE_END;
+		pt->compat_va_start = KGSL_IOMMU_SECURE_BASE(mmu) +
+						secure_global_size;
+		pt->compat_va_end = KGSL_IOMMU_SECURE_END(mmu);
+		pt->va_start = KGSL_IOMMU_SECURE_BASE(mmu) + secure_global_size;
+		pt->va_end = KGSL_IOMMU_SECURE_END(mmu);
 	} else {
 		pt->compat_va_start = KGSL_IOMMU_SVM_BASE32;
-		pt->compat_va_end = KGSL_IOMMU_SVM_END32;
+		pt->compat_va_end = KGSL_IOMMU_SECURE_BASE(mmu);
 		pt->va_start = KGSL_IOMMU_VA_BASE64;
 		pt->va_end = KGSL_IOMMU_VA_END64;
 	}
@@ -745,7 +1058,7 @@ static void setup_64bit_pagetable(struct kgsl_mmu *mmu,
 		pagetable->name != KGSL_MMU_SECURE_PT) {
 		if ((BITS_PER_LONG == 32) || is_compat_task()) {
 			pt->svm_start = KGSL_IOMMU_SVM_BASE32;
-			pt->svm_end = KGSL_IOMMU_SVM_END32;
+			pt->svm_end = KGSL_IOMMU_SECURE_BASE(mmu);
 		} else {
 			pt->svm_start = KGSL_IOMMU_SVM_BASE64;
 			pt->svm_end = KGSL_IOMMU_SVM_END64;
@@ -757,21 +1070,26 @@ static void setup_32bit_pagetable(struct kgsl_mmu *mmu,
 		struct kgsl_pagetable *pagetable,
 		struct kgsl_iommu_pt *pt)
 {
+	unsigned int secure_global_size = kgsl_global_secure_pt_entry != NULL ?
+					kgsl_global_secure_pt_entry->size : 0;
 	if (mmu->secured) {
 		if (pagetable->name == KGSL_MMU_SECURE_PT) {
-			pt->compat_va_start = KGSL_IOMMU_SECURE_BASE;
-			pt->compat_va_end = KGSL_IOMMU_SECURE_END;
-			pt->va_start = KGSL_IOMMU_SECURE_BASE;
-			pt->va_end = KGSL_IOMMU_SECURE_END;
+			pt->compat_va_start = KGSL_IOMMU_SECURE_BASE(mmu) +
+						secure_global_size;
+			pt->compat_va_end = KGSL_IOMMU_SECURE_END(mmu);
+			pt->va_start = KGSL_IOMMU_SECURE_BASE(mmu) +
+						secure_global_size;
+			pt->va_end = KGSL_IOMMU_SECURE_END(mmu);
 		} else {
 			pt->va_start = KGSL_IOMMU_SVM_BASE32;
-			pt->va_end = KGSL_IOMMU_SECURE_BASE;
+			pt->va_end = KGSL_IOMMU_SECURE_BASE(mmu) +
+						secure_global_size;
 			pt->compat_va_start = pt->va_start;
 			pt->compat_va_end = pt->va_end;
 		}
 	} else {
 		pt->va_start = KGSL_IOMMU_SVM_BASE32;
-		pt->va_end = KGSL_IOMMU_GLOBAL_MEM_BASE;
+		pt->va_end = KGSL_IOMMU_GLOBAL_MEM_BASE(mmu);
 		pt->compat_va_start = pt->va_start;
 		pt->compat_va_end = pt->va_end;
 	}
@@ -955,6 +1273,8 @@ static int _init_secure_pt(struct kgsl_mmu *mmu, struct kgsl_pagetable *pt)
 	ctx->regbase = iommu->regbase + KGSL_IOMMU_CB0_OFFSET
 			+ (cb_num << KGSL_IOMMU_CB_SHIFT);
 
+	kgsl_map_global_secure_pt_entry(pt);
+
 done:
 	if (ret)
 		_free_pt(ctx, pt);
@@ -1120,6 +1440,7 @@ static void kgsl_iommu_close(struct kgsl_mmu *mmu)
 
 	kgsl_iommu_remove_global(mmu, &iommu->setstate);
 	kgsl_sharedmem_free(&iommu->setstate);
+	kgsl_cleanup_qdss_desc(mmu);
 }
 
 static int _setstate_alloc(struct kgsl_device *device,
@@ -1127,17 +1448,16 @@ static int _setstate_alloc(struct kgsl_device *device,
 {
 	int ret;
 
-	ret = kgsl_sharedmem_alloc_contig(device, &iommu->setstate, NULL,
-		PAGE_SIZE);
-	if (ret)
-		return ret;
+	ret = kgsl_sharedmem_alloc_contig(device, &iommu->setstate, PAGE_SIZE);
 
-	/* Mark the setstate memory as read only */
-	iommu->setstate.flags |= KGSL_MEMFLAGS_GPUREADONLY;
+	if (!ret) {
+		/* Mark the setstate memory as read only */
+		iommu->setstate.flags |= KGSL_MEMFLAGS_GPUREADONLY;
 
-	kgsl_sharedmem_set(device, &iommu->setstate, 0, 0, PAGE_SIZE);
+		kgsl_sharedmem_set(device, &iommu->setstate, 0, 0, PAGE_SIZE);
+	}
 
-	return 0;
+	return ret;
 }
 
 static int kgsl_iommu_init(struct kgsl_mmu *mmu)
@@ -1148,7 +1468,6 @@ static int kgsl_iommu_init(struct kgsl_mmu *mmu)
 	int status;
 
 	mmu->features |= KGSL_MMU_PAGED;
-	mmu->features |= KGSL_MMU_NEED_GUARD_PAGE;
 
 	if (ctx->name == NULL) {
 		KGSL_CORE_ERR("dt: gfx3d0_user context bank not found\n");
@@ -1191,16 +1510,8 @@ static int kgsl_iommu_init(struct kgsl_mmu *mmu)
 		}
 	}
 
-	if (kgsl_guard_page == NULL) {
-		kgsl_guard_page = alloc_page(GFP_KERNEL | __GFP_ZERO |
-				__GFP_HIGHMEM);
-		if (kgsl_guard_page == NULL) {
-			status = -ENOMEM;
-			goto done;
-		}
-	}
-
-	kgsl_iommu_add_global(mmu, &iommu->setstate);
+	kgsl_iommu_add_global(mmu, &iommu->setstate, "setstate");
+	kgsl_setup_qdss_desc(device);
 
 done:
 	if (status)
@@ -1227,6 +1538,8 @@ static int _setup_user_context(struct kgsl_mmu *mmu)
 			ret = PTR_ERR(mmu->defaultpagetable);
 			mmu->defaultpagetable = NULL;
 			return ret;
+		} else if (mmu->defaultpagetable == NULL) {
+			return -ENOMEM;
 		}
 	}
 
@@ -1314,37 +1627,56 @@ done:
 	return ret;
 }
 
+static int kgsl_iommu_set_pt(struct kgsl_mmu *mmu, struct kgsl_pagetable *pt);
+
 static int kgsl_iommu_start(struct kgsl_mmu *mmu)
 {
 	int status;
 	struct kgsl_iommu *iommu = _IOMMU_PRIV(mmu);
-	struct kgsl_iommu_context *ctx = &iommu->ctx[KGSL_IOMMU_CONTEXT_USER];
 
 	status = _setup_user_context(mmu);
 	if (status)
 		return status;
 
 	status = _setup_secure_context(mmu);
-	if (status)
+	if (status) {
 		_detach_context(&iommu->ctx[KGSL_IOMMU_CONTEXT_USER]);
-	else {
-		kgsl_iommu_enable_clk(mmu);
-		KGSL_IOMMU_SET_CTX_REG(ctx, TLBIALL, 1);
-		kgsl_iommu_disable_clk(mmu);
+		return status;
 	}
-	return status;
+
+	/* Make sure the hardware is programmed to the default pagetable */
+	return kgsl_iommu_set_pt(mmu, mmu->defaultpagetable);
 }
 
 static int
-kgsl_iommu_unmap(struct kgsl_pagetable *pt,
-		struct kgsl_memdesc *memdesc)
+kgsl_iommu_unmap_offset(struct kgsl_pagetable *pt,
+		struct kgsl_memdesc *memdesc, uint64_t addr,
+		uint64_t offset, uint64_t size)
+{
+	/*
+	 * All GPU addresses as assigned are page aligned, but some
+	 * functions perturb the gpuaddr with an offset, so apply the
+	 * mask here to make sure we have the right address.
+	 */
+
+	addr = PAGE_ALIGN(addr);
+
+	if (size == 0 || addr == 0)
+		return 0;
+
+	return _iommu_unmap_sync_pc(pt, memdesc, addr + offset, size);
+}
+
+static int
+kgsl_iommu_unmap(struct kgsl_pagetable *pt, struct kgsl_memdesc *memdesc)
 {
 	uint64_t size = memdesc->size;
 
 	if (kgsl_memdesc_has_guard_page(memdesc))
 		size += kgsl_memdesc_guard_page_size(pt->mmu, memdesc);
 
-	return _iommu_unmap_sync_pc(pt, memdesc, memdesc->gpuaddr, size);
+	return kgsl_iommu_unmap_offset(pt, memdesc, memdesc->gpuaddr, 0,
+			size);
 }
 
 /**
@@ -1378,7 +1710,7 @@ static int _iommu_map_guard_page(struct kgsl_pagetable *pt,
 
 		if (!kgsl_secure_guard_page_memdesc.sgt) {
 			if (kgsl_allocate_user(KGSL_MMU_DEVICE(pt->mmu),
-					&kgsl_secure_guard_page_memdesc, pt,
+					&kgsl_secure_guard_page_memdesc,
 					sgp_size, KGSL_MEMFLAGS_SECURE)) {
 				KGSL_CORE_ERR(
 					"Secure guard page alloc failed\n");
@@ -1388,12 +1720,33 @@ static int _iommu_map_guard_page(struct kgsl_pagetable *pt,
 
 		sg = kgsl_secure_guard_page_memdesc.sgt->sgl;
 		physaddr = page_to_phys(sg_page(sg));
-	} else
+	} else {
+		if (kgsl_guard_page == NULL) {
+			kgsl_guard_page = alloc_page(GFP_KERNEL | __GFP_ZERO |
+					__GFP_HIGHMEM);
+			if (kgsl_guard_page == NULL)
+				return -ENOMEM;
+		}
+
 		physaddr = page_to_phys(kgsl_guard_page);
+	}
 
 	return _iommu_map_sync_pc(pt, memdesc, gpuaddr, physaddr,
 			kgsl_memdesc_guard_page_size(pt->mmu, memdesc),
 			protflags & ~IOMMU_WRITE);
+}
+
+static unsigned int _get_protection_flags(struct kgsl_memdesc *memdesc)
+{
+	unsigned int flags = IOMMU_READ | IOMMU_WRITE | IOMMU_NOEXEC;
+
+	if (memdesc->flags & KGSL_MEMFLAGS_GPUREADONLY)
+		flags &= ~IOMMU_WRITE;
+
+	if (memdesc->priv & KGSL_MEMDESC_PRIVILEGED)
+		flags |= IOMMU_PRIV;
+
+	return flags;
 }
 
 static int
@@ -1403,26 +1756,74 @@ kgsl_iommu_map(struct kgsl_pagetable *pt,
 	int ret;
 	uint64_t addr = memdesc->gpuaddr;
 	uint64_t size = memdesc->size;
-	unsigned int flags;
+	unsigned int flags = _get_protection_flags(memdesc);
+	struct sg_table *sgt = NULL;
 
-	BUG_ON(NULL == pt->priv);
+	/*
+	 * For paged memory allocated through kgsl, memdesc->pages is not NULL.
+	 * Allocate sgt here just for its map operation. Contiguous memory
+	 * already has its sgt, so no need to allocate it here.
+	 */
+	if (memdesc->pages != NULL)
+		sgt = kgsl_alloc_sgt_from_pages(memdesc);
+	else
+		sgt = memdesc->sgt;
 
-	flags = IOMMU_READ | IOMMU_WRITE | IOMMU_NOEXEC;
+	if (IS_ERR(sgt))
+		return PTR_ERR(sgt);
 
-	/* Set up the protection for the page(s) */
-	if (memdesc->flags & KGSL_MEMFLAGS_GPUREADONLY)
-		flags &= ~IOMMU_WRITE;
-
-	if (memdesc->priv & KGSL_MEMDESC_PRIVILEGED)
-		flags |= IOMMU_PRIV;
-
-	ret = _iommu_map_sg_sync_pc(pt, addr, memdesc, flags);
+	ret = _iommu_map_sg_sync_pc(pt, addr, memdesc, sgt->sgl,
+				sgt->nents, flags);
 	if (ret)
-		return ret;
+		goto done;
 
 	ret = _iommu_map_guard_page(pt, memdesc, addr + size, flags);
 	if (ret)
 		_iommu_unmap_sync_pc(pt, memdesc, addr, size);
+
+done:
+	if (memdesc->pages != NULL)
+		kgsl_free_sgt(sgt);
+
+	return ret;
+}
+
+static int kgsl_iommu_map_offset(struct kgsl_pagetable *pt,
+		uint64_t virtaddr, uint64_t virtoffset,
+		struct kgsl_memdesc *memdesc, uint64_t physoffset,
+		uint64_t size, uint64_t feature_flag)
+{
+	int pg_sz;
+	unsigned int protflags = _get_protection_flags(memdesc);
+	int ret;
+	struct sg_table *sgt = NULL;
+
+	pg_sz = (1 << kgsl_memdesc_get_align(memdesc));
+	if (!IS_ALIGNED(virtaddr | virtoffset | physoffset | size, pg_sz))
+		return -EINVAL;
+
+	if (size == 0)
+		return -EINVAL;
+
+	/*
+	 * For paged memory allocated through kgsl, memdesc->pages is not NULL.
+	 * Allocate sgt here just for its map operation. Contiguous memory
+	 * already has its sgt, so no need to allocate it here.
+	 */
+	if (memdesc->pages != NULL)
+		sgt = kgsl_alloc_sgt_from_pages(memdesc);
+	else
+		sgt = memdesc->sgt;
+
+	if (IS_ERR(sgt))
+		return PTR_ERR(sgt);
+
+	ret = _iommu_map_sg_offset_sync_pc(pt, virtaddr + virtoffset,
+		memdesc, sgt->sgl, sgt->nents,
+		physoffset, size, protflags);
+
+	if (memdesc->pages != NULL)
+		kgsl_free_sgt(sgt);
 
 	return ret;
 }
@@ -1519,37 +1920,21 @@ kgsl_iommu_get_current_ttbr0(struct kgsl_mmu *mmu)
  *
  * Return - void
  */
-static int kgsl_iommu_set_pt(struct kgsl_mmu *mmu,
-				struct kgsl_pagetable *pt)
+static int kgsl_iommu_set_pt(struct kgsl_mmu *mmu, struct kgsl_pagetable *pt)
 {
-	struct kgsl_device *device = KGSL_MMU_DEVICE(mmu);
 	struct kgsl_iommu *iommu = _IOMMU_PRIV(mmu);
 	struct kgsl_iommu_context *ctx = &iommu->ctx[KGSL_IOMMU_CONTEXT_USER];
-	int ret = 0;
 	uint64_t ttbr0, temp;
 	unsigned int contextidr;
 	unsigned long wait_for_flush;
 
-	/*
-	 * If using a global pagetable, we can skip all this
-	 * because the pagetable will be set up by the iommu
-	 * driver and never changed at runtime.
-	 */
-	if (!kgsl_mmu_is_perprocess(mmu))
+	if ((pt != mmu->defaultpagetable) && !kgsl_mmu_is_perprocess(mmu))
 		return 0;
 
 	kgsl_iommu_enable_clk(mmu);
 
 	ttbr0 = kgsl_mmu_pagetable_get_ttbr0(pt);
 	contextidr = kgsl_mmu_pagetable_get_contextidr(pt);
-
-	/*
-	 * Taking the liberty to spin idle since this codepath
-	 * is invoked when we can spin safely for it to be idle
-	 */
-	ret = adreno_spin_idle(ADRENO_DEVICE(device), ADRENO_IDLE_TIMEOUT);
-	if (ret)
-		return ret;
 
 	KGSL_IOMMU_SET_CTX_REG_Q(ctx, TTBR0, ttbr0);
 	KGSL_IOMMU_SET_CTX_REG(ctx, CONTEXTIDR, contextidr);
@@ -1579,10 +1964,8 @@ static int kgsl_iommu_set_pt(struct kgsl_mmu *mmu,
 		cpu_relax();
 	}
 
-	/* Disable smmu clock */
 	kgsl_iommu_disable_clk(mmu);
-
-	return ret;
+	return 0;
 }
 
 /*
@@ -1600,8 +1983,6 @@ static int kgsl_iommu_set_pf_policy(struct kgsl_mmu *mmu,
 	struct kgsl_iommu_context *ctx = &iommu->ctx[KGSL_IOMMU_CONTEXT_USER];
 	struct kgsl_device *device = KGSL_MMU_DEVICE(mmu);
 	struct adreno_device *adreno_dev = ADRENO_DEVICE(device);
-	int ret = 0;
-	unsigned int sctlr_val;
 
 	if ((adreno_dev->ft_pf_policy &
 		BIT(KGSL_FT_PAGEFAULT_GPUHALT_ENABLE)) ==
@@ -1610,10 +1991,7 @@ static int kgsl_iommu_set_pf_policy(struct kgsl_mmu *mmu,
 
 	/* If not attached, policy will be updated during the next attach */
 	if (ctx->default_pt != NULL) {
-		/* Need to idle device before changing options */
-		ret = device->ftbl->idle(device);
-		if (ret)
-			return ret;
+		unsigned int sctlr_val;
 
 		kgsl_iommu_enable_clk(mmu);
 
@@ -1632,7 +2010,7 @@ static int kgsl_iommu_set_pf_policy(struct kgsl_mmu *mmu,
 		kgsl_iommu_disable_clk(mmu);
 	}
 
-	return ret;
+	return 0;
 }
 
 static struct kgsl_protected_registers *
@@ -1858,9 +2236,21 @@ static uint64_t kgsl_iommu_find_svm_region(struct kgsl_pagetable *pagetable,
 	return addr;
 }
 
-#define ADDR_IN_GLOBAL(_a) \
-	(((_a) >= KGSL_IOMMU_GLOBAL_MEM_BASE) && \
-	 ((_a) < (KGSL_IOMMU_GLOBAL_MEM_BASE + KGSL_IOMMU_GLOBAL_MEM_SIZE)))
+static bool iommu_addr_in_svm_ranges(struct kgsl_iommu_pt *pt,
+	u64 gpuaddr, u64 size)
+{
+	if ((gpuaddr >= pt->compat_va_start && gpuaddr < pt->compat_va_end) &&
+		((gpuaddr + size) > pt->compat_va_start &&
+			(gpuaddr + size) <= pt->compat_va_end))
+		return true;
+
+	if ((gpuaddr >= pt->svm_start && gpuaddr < pt->svm_end) &&
+		((gpuaddr + size) > pt->svm_start &&
+			(gpuaddr + size) <= pt->svm_end))
+		return true;
+
+	return false;
+}
 
 static int kgsl_iommu_set_svm_region(struct kgsl_pagetable *pagetable,
 		uint64_t gpuaddr, uint64_t size)
@@ -1869,8 +2259,8 @@ static int kgsl_iommu_set_svm_region(struct kgsl_pagetable *pagetable,
 	struct kgsl_iommu_pt *pt = pagetable->priv;
 	struct rb_node *node;
 
-	/* Make sure the requested address doesn't fall in the global range */
-	if (ADDR_IN_GLOBAL(gpuaddr) || ADDR_IN_GLOBAL(gpuaddr + size))
+	/* Make sure the requested address doesn't fall out of SVM range */
+	if (!iommu_addr_in_svm_ranges(pt, gpuaddr, size))
 		return -ENOMEM;
 
 	spin_lock(&pagetable->lock);
@@ -1937,23 +2327,27 @@ static int kgsl_iommu_get_gpuaddr(struct kgsl_pagetable *pagetable,
 	}
 
 	ret = _insert_gpuaddr(pagetable, addr, size);
-	if (ret == 0)
+	if (ret == 0) {
 		memdesc->gpuaddr = addr;
+		memdesc->pagetable = pagetable;
+	}
 
 out:
 	spin_unlock(&pagetable->lock);
 	return ret;
 }
 
-static void kgsl_iommu_put_gpuaddr(struct kgsl_pagetable *pagetable,
-		struct kgsl_memdesc *memdesc)
+static void kgsl_iommu_put_gpuaddr(struct kgsl_memdesc *memdesc)
 {
-	spin_lock(&pagetable->lock);
+	if (memdesc->pagetable == NULL)
+		return;
 
-	if (_remove_gpuaddr(pagetable, memdesc->gpuaddr))
+	spin_lock(&memdesc->pagetable->lock);
+
+	if (_remove_gpuaddr(memdesc->pagetable, memdesc->gpuaddr))
 		BUG();
 
-	spin_unlock(&pagetable->lock);
+	spin_unlock(&memdesc->pagetable->lock);
 }
 
 static int kgsl_iommu_svm_range(struct kgsl_pagetable *pagetable,
@@ -2179,6 +2573,7 @@ struct kgsl_mmu_ops kgsl_iommu_ops = {
 	.mmu_add_global = kgsl_iommu_add_global,
 	.mmu_remove_global = kgsl_iommu_remove_global,
 	.mmu_getpagetable = kgsl_iommu_getpagetable,
+	.mmu_get_qdss_global_entry = kgsl_iommu_get_qdss_global_entry,
 	.probe = kgsl_iommu_probe,
 };
 
@@ -2194,4 +2589,6 @@ static struct kgsl_mmu_pt_ops iommu_pt_ops = {
 	.find_svm_region = kgsl_iommu_find_svm_region,
 	.svm_range = kgsl_iommu_svm_range,
 	.addr_in_range = kgsl_iommu_addr_in_range,
+	.mmu_map_offset = kgsl_iommu_map_offset,
+	.mmu_unmap_offset = kgsl_iommu_unmap_offset,
 };

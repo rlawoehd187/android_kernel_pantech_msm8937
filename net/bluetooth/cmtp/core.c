@@ -108,7 +108,7 @@ static inline void cmtp_add_msgpart(struct cmtp_session *session, int id, const 
 	struct sk_buff *skb = session->reassembly[id], *nskb;
 	int size;
 
-	BT_DBG("session %p buf %p count %d", session, buf, count);
+	BT_DBG("session %pK buf %pK count %d", session, buf, count);
 
 	size = (skb) ? skb->len + count : count;
 
@@ -133,7 +133,7 @@ static inline int cmtp_recv_frame(struct cmtp_session *session, struct sk_buff *
 	__u8 hdr, hdrlen, id;
 	__u16 len;
 
-	BT_DBG("session %p skb %p len %d", session, skb, skb->len);
+	BT_DBG("session %pK skb %pK len %d", session, skb, skb->len);
 
 	while (skb->len > 0) {
 		hdr = skb->data[0];
@@ -196,7 +196,7 @@ static int cmtp_send_frame(struct cmtp_session *session, unsigned char *data, in
 	struct kvec iv = { data, len };
 	struct msghdr msg;
 
-	BT_DBG("session %p data %p len %d", session, data, len);
+	BT_DBG("session %pK data %pK len %d", session, data, len);
 
 	if (!len)
 		return 0;
@@ -212,7 +212,7 @@ static void cmtp_process_transmit(struct cmtp_session *session)
 	unsigned char *hdr;
 	unsigned int size, tail;
 
-	BT_DBG("session %p", session);
+	BT_DBG("session %pK", session);
 
 	nskb = alloc_skb(session->mtu, GFP_ATOMIC);
 	if (!nskb) {
@@ -280,16 +280,16 @@ static int cmtp_session(void *arg)
 	struct cmtp_session *session = arg;
 	struct sock *sk = session->sock->sk;
 	struct sk_buff *skb;
-	wait_queue_t wait;
+	DEFINE_WAIT_FUNC(wait, woken_wake_function);
 
-	BT_DBG("session %p", session);
+	BT_DBG("session %pK", session);
 
 	set_user_nice(current, -15);
 
-	init_waitqueue_entry(&wait, current);
 	add_wait_queue(sk_sleep(sk), &wait);
 	while (1) {
-		set_current_state(TASK_INTERRUPTIBLE);
+		/* Ensure session->terminate is updated */
+		smp_mb__before_atomic();
 
 		if (atomic_read(&session->terminate))
 			break;
@@ -306,9 +306,8 @@ static int cmtp_session(void *arg)
 
 		cmtp_process_transmit(session);
 
-		schedule();
+		wait_woken(&wait, TASK_INTERRUPTIBLE, MAX_SCHEDULE_TIMEOUT);
 	}
-	__set_current_state(TASK_RUNNING);
 	remove_wait_queue(sk_sleep(sk), &wait);
 
 	down_write(&cmtp_session_sem);
@@ -333,6 +332,9 @@ int cmtp_add_connection(struct cmtp_connadd_req *req, struct socket *sock)
 	int i, err;
 
 	BT_DBG("");
+
+	if (!l2cap_is_socket(sock))
+		return -EBADFD;
 
 	session = kzalloc(sizeof(struct cmtp_session), GFP_KERNEL);
 	if (!session)
@@ -386,7 +388,7 @@ int cmtp_add_connection(struct cmtp_connadd_req *req, struct socket *sock)
 		err = cmtp_attach_device(session);
 		if (err < 0) {
 			atomic_inc(&session->terminate);
-			wake_up_process(session->task);
+			wake_up_interruptible(sk_sleep(session->sock->sk));
 			up_write(&cmtp_session_sem);
 			return err;
 		}
@@ -420,7 +422,11 @@ int cmtp_del_connection(struct cmtp_conndel_req *req)
 
 		/* Stop session thread */
 		atomic_inc(&session->terminate);
-		wake_up_process(session->task);
+
+		/* Ensure session->terminate is updated */
+		smp_mb__after_atomic();
+
+		wake_up_interruptible(sk_sleep(session->sock->sk));
 	} else
 		err = -ENOENT;
 

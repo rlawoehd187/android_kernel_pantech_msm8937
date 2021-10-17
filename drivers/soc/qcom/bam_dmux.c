@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2016, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2011-2016, 2018, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -2305,7 +2305,9 @@ static int bam_init(void)
 	a2_props.virt_addr = a2_virt_addr;
 	a2_props.virt_size = a2_phys_size;
 	a2_props.irq = a2_bam_irq;
-	a2_props.options = SPS_BAM_OPT_IRQ_WAKEUP | SPS_BAM_HOLD_MEM;
+	a2_props.options = SPS_BAM_OPT_IRQ_WAKEUP
+				| SPS_BAM_HOLD_MEM
+				| SPS_BAM_OPT_IRQ_NO_SUSPEND;
 	a2_props.num_pipes = A2_NUM_PIPES;
 	a2_props.summing_threshold = A2_SUMMING_THRESHOLD;
 	a2_props.constrained_logging = true;
@@ -2747,7 +2749,11 @@ static int bam_dmux_probe(struct platform_device *pdev)
 	 * block the watchdog pet function, so that netif_rx() in rmnet
 	 * only uses one queue.
 	 */
-	bam_mux_rx_workqueue = alloc_workqueue("bam_dmux_rx",
+	if (no_cpu_affinity)
+		bam_mux_rx_workqueue =
+			create_singlethread_workqueue("bam_dmux_rx");
+	else
+		bam_mux_rx_workqueue = alloc_workqueue("bam_dmux_rx",
 					WQ_MEM_RECLAIM | WQ_CPU_INTENSIVE, 1);
 	if (!bam_mux_rx_workqueue)
 		return -ENOMEM;

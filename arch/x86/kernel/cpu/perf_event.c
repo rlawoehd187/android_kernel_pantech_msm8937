@@ -32,6 +32,7 @@
 #include <asm/smp.h>
 #include <asm/alternative.h>
 #include <asm/tlbflush.h>
+#include <asm/mmu_context.h>
 #include <asm/timer.h>
 #include <asm/desc.h>
 #include <asm/ldt.h>
@@ -64,7 +65,7 @@ u64 x86_perf_event_update(struct perf_event *event)
 	int shift = 64 - x86_pmu.cntval_bits;
 	u64 prev_raw_count, new_raw_count;
 	int idx = hwc->idx;
-	s64 delta;
+	u64 delta;
 
 	if (idx == INTEL_PMC_IDX_FIXED_BTS)
 		return 0;
@@ -1388,6 +1389,7 @@ static void __init filter_events(struct attribute **attrs)
 {
 	struct device_attribute *d;
 	struct perf_pmu_events_attr *pmu_attr;
+	int offset = 0;
 	int i, j;
 
 	for (i = 0; attrs[i]; i++) {
@@ -1396,7 +1398,7 @@ static void __init filter_events(struct attribute **attrs)
 		/* str trumps id */
 		if (pmu_attr->event_str)
 			continue;
-		if (x86_pmu.event_map(i))
+		if (x86_pmu.event_map(i + offset))
 			continue;
 
 		for (j = i; attrs[j]; j++)
@@ -1404,6 +1406,14 @@ static void __init filter_events(struct attribute **attrs)
 
 		/* Check the shifted attr. */
 		i--;
+
+		/*
+		 * event_map() is index based, the attrs array is organized
+		 * by increasing event index. If we shift the events, then
+		 * we need to compensate for the event_map(), otherwise
+		 * we are looking up the wrong event in the map
+		 */
+		offset++;
 	}
 }
 
@@ -1987,21 +1997,25 @@ static unsigned long get_segment_base(unsigned int segment)
 	int idx = segment >> 3;
 
 	if ((segment & SEGMENT_TI_MASK) == SEGMENT_LDT) {
+		struct ldt_struct *ldt;
+
 		if (idx > LDT_ENTRIES)
 			return 0;
 
-		if (idx > current->active_mm->context.size)
+		/* IRQs are off, so this synchronizes with smp_store_release */
+		ldt = lockless_dereference(current->active_mm->context.ldt);
+		if (!ldt || idx > ldt->size)
 			return 0;
 
-		desc = current->active_mm->context.ldt;
+		desc = &ldt->entries[idx];
 	} else {
 		if (idx > GDT_ENTRIES)
 			return 0;
 
-		desc = raw_cpu_ptr(gdt_page.gdt);
+		desc = raw_cpu_ptr(gdt_page.gdt) + idx;
 	}
 
-	return get_desc_base(desc + idx);
+	return get_desc_base(desc);
 }
 
 #ifdef CONFIG_COMPAT

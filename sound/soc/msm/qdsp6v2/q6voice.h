@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2016, 2019 The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -141,7 +141,7 @@ struct share_mem_buf {
 struct mem_map_table {
 	dma_addr_t		phys;
 	void			*data;
-	uint32_t		size; /* size of buffer */
+	size_t			size; /* size of buffer */
 	struct ion_handle	*handle;
 	struct ion_client	*client;
 };
@@ -815,6 +815,37 @@ struct vss_icommon_cmd_set_ui_property_enable_t {
 };
 
 /*
+ *Event sent by the stream to the client that enables Tx Mute DTMF
+ *detection whenever DTMF is detected in the Tx path
+ */
+
+#define VSS_IVOCPROC_CMD_SET_TX_DTMF_MUTE 0x00013362
+
+/* DTMF mute enable flag. */
+#define VSS_IVOCPROC_TX_DTMF_MUTE_ENABLE 1
+
+/* DTMF mute disable flag. */
+#define VSS_IVOCPROC_TX_DTMF_MUTE_DISABLE 0
+
+struct vss_ivocproc_cmd_set_tx_dtmf_mute_t {
+
+	uint16_t enable;
+	/*Specifies whether Tx DTMF mute is enabled.
+
+	@values
+	- #VSS_IVOCPROC_TX_DTMF_MUTE_ENABLE
+	- #VSS_IVOCPROC_TX_DTMF_MUTE_DISABLE @tablebulletend */
+	uint16_t delay_us;
+	/*This is delay between input and output of DTMF module.*/
+};
+
+struct cvp_set_tx_dtmf_mute_detection_cmd {
+	struct apr_hdr hdr;
+	struct vss_ivocproc_cmd_set_tx_dtmf_mute_t cvp_dtmf_det;
+} __packed;
+
+
+/*
  * Event sent by the stream to the client that enables Rx DTMF
  * detection whenever DTMF is detected in the Rx path.
  *
@@ -1026,12 +1057,12 @@ struct vss_istream_cmd_set_packet_exchange_mode_t {
 #define VSS_IVOCPROC_VOCPROC_MODE_EC_EXT_MIXING	0x00010F7D
 
 /* Default AFE port ID. Applicable to Tx and Rx. */
-#define VSS_IVOCPROC_PORT_ID_NONE			0xFFFF
+#define VSS_IVOCPROC_PORT_ID_NONE		0xFFFF
 
-#define VSS_NETWORK_ID_DEFAULT				0x00010037
-#define VSS_NETWORK_ID_VOIP_NB				0x00011240
-#define VSS_NETWORK_ID_VOIP_WB				0x00011241
-#define VSS_NETWORK_ID_VOIP_WV				0x00011242
+#define VSS_NETWORK_ID_DEFAULT		0x00010037
+
+/* Voice over Internet Protocol (VoIP) network ID. Common for all bands.*/
+#define VSS_NETWORK_ID_VOIP		0x00011362
 
 /* Media types */
 #define VSS_MEDIA_ID_EVRC_MODEM		0x00010FC2
@@ -1040,8 +1071,12 @@ struct vss_istream_cmd_set_packet_exchange_mode_t {
 /* 80-VF690-47 UMTS AMR-NB vocoder modem format. */
 #define VSS_MEDIA_ID_AMR_WB_MODEM	0x00010FC7
 /* 80-VF690-47 UMTS AMR-WB vocoder modem format. */
-#define VSS_MEDIA_ID_PCM_NB		0x00010FCB
-#define VSS_MEDIA_ID_PCM_WB		0x00010FCC
+
+#define VSS_MEDIA_ID_PCM_8_KHZ		0x00010FCB
+#define VSS_MEDIA_ID_PCM_16_KHZ		0x00010FCC
+#define VSS_MEDIA_ID_PCM_32_KHZ		0x00010FD9
+#define VSS_MEDIA_ID_PCM_48_KHZ		0x00010FD6
+
 /* Linear PCM (16-bit, little-endian). */
 #define VSS_MEDIA_ID_G711_ALAW		0x00010FCD
 /* G.711 a-law (contains two 10ms vocoder frames). */
@@ -1277,7 +1312,7 @@ struct vss_ivocproc_cmd_topology_set_dev_channels_t {
 #define VSS_IVPCM_SAMPLING_RATE_16K	16000
 
 /* RX and TX */
-#define MAX_TAP_POINTS_SUPPORTED	1
+#define MAX_TAP_POINTS_SUPPORTED	2
 
 struct vss_ivpcm_tap_point {
 	uint32_t tap_point;
@@ -1576,6 +1611,8 @@ struct voice_data {
 	uint32_t st_enable;
 	uint32_t hd_enable;
 	uint32_t dtmf_rx_detect_en;
+	uint16_t dtmf_mute_tx_detect_en;
+	uint16_t dtmf_mute_tx_detect_delay;
 	/* Local Call Hold mode */
 	uint8_t lch_mode;
 
@@ -1741,6 +1778,8 @@ int voc_set_route_flag(uint32_t session_id, uint8_t path_dir, uint8_t set);
 uint8_t voc_get_route_flag(uint32_t session_id, uint8_t path_dir);
 int voc_enable_dtmf_rx_detection(uint32_t session_id, uint32_t enable);
 void voc_disable_dtmf_det_on_active_sessions(void);
+int voc_enable_dtmf_mute_tx_detection(uint32_t session_id,
+				      uint16_t enable, uint16_t delay_us);
 int voc_alloc_cal_shared_memory(void);
 int voc_alloc_voip_shared_memory(void);
 int is_voc_initialized(void);

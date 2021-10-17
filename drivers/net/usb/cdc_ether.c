@@ -171,6 +171,8 @@ int usbnet_generic_cdc_bind(struct usbnet *dev, struct usb_interface *intf)
 				dev_dbg(&intf->dev, "extra CDC header\n");
 				goto bad_desc;
 			}
+			if (len < sizeof(struct usb_cdc_header_desc))
+				break;
 			info->header = (void *) buf;
 			if (info->header->bLength != sizeof(*info->header)) {
 				dev_dbg(&intf->dev, "CDC header len %u\n",
@@ -184,6 +186,8 @@ int usbnet_generic_cdc_bind(struct usbnet *dev, struct usb_interface *intf)
 			 */
 			if (rndis) {
 				struct usb_cdc_acm_descriptor *acm;
+				if (len < sizeof(struct usb_cdc_acm_descriptor))
+					break;
 
 				acm = (void *) buf;
 				if (acm->bmCapabilities) {
@@ -200,6 +204,8 @@ int usbnet_generic_cdc_bind(struct usbnet *dev, struct usb_interface *intf)
 				dev_dbg(&intf->dev, "extra CDC union\n");
 				goto bad_desc;
 			}
+			if (len < sizeof(struct usb_cdc_union_desc))
+				break;
 			info->u = (void *) buf;
 			if (info->u->bLength != sizeof(*info->u)) {
 				dev_dbg(&intf->dev, "CDC union len %u\n",
@@ -217,7 +223,7 @@ int usbnet_generic_cdc_bind(struct usbnet *dev, struct usb_interface *intf)
 						info->u->bSlaveInterface0);
 			if (!info->control || !info->data) {
 				dev_dbg(&intf->dev,
-					"master #%u/%p slave #%u/%p\n",
+					"master #%u/%pK slave #%u/%pK\n",
 					info->u->bMasterInterface0,
 					info->control,
 					info->u->bSlaveInterface0,
@@ -258,6 +264,8 @@ int usbnet_generic_cdc_bind(struct usbnet *dev, struct usb_interface *intf)
 				dev_dbg(&intf->dev, "extra CDC ether\n");
 				goto bad_desc;
 			}
+			if (len < sizeof(struct usb_cdc_ether_desc))
+				break;
 			info->ether = (void *) buf;
 			if (info->ether->bLength != sizeof(*info->ether)) {
 				dev_dbg(&intf->dev, "CDC ether len %u\n",
@@ -275,7 +283,6 @@ int usbnet_generic_cdc_bind(struct usbnet *dev, struct usb_interface *intf)
 				dev_dbg(&intf->dev, "extra MDLM descriptor\n");
 				goto bad_desc;
 			}
-
 			desc = (void *)buf;
 
 			if (desc->bLength != sizeof(*desc))
@@ -317,7 +324,7 @@ next_desc:
 		info->data = usb_ifnum_to_if(dev->udev, 1);
 		if (!info->control || !info->data || info->control != intf) {
 			dev_dbg(&intf->dev,
-				"rndis: master #0/%p slave #1/%p\n",
+				"rndis: master #0/%pK slave #1/%pK\n",
 				info->control,
 				info->data);
 			goto bad_desc;
@@ -521,6 +528,7 @@ static const struct driver_info wwan_info = {
 #define DELL_VENDOR_ID		0x413C
 #define REALTEK_VENDOR_ID	0x0bda
 #define SAMSUNG_VENDOR_ID	0x04e8
+#define HP_VENDOR_ID		0x03f0
 
 static const struct usb_device_id	products[] = {
 /* BLACKLIST !!
@@ -664,6 +672,13 @@ static const struct usb_device_id	products[] = {
 {
 	USB_DEVICE_AND_INTERFACE_INFO(NOVATEL_VENDOR_ID, 0x9011, USB_CLASS_COMM,
 			USB_CDC_SUBCLASS_ETHERNET, USB_CDC_PROTO_NONE),
+	.driver_info = 0,
+},
+
+/* HP lt2523 (Novatel E371) - handled by qmi_wwan */
+{
+	USB_DEVICE_AND_INTERFACE_INFO(HP_VENDOR_ID, 0x421d, USB_CLASS_COMM,
+				      USB_CDC_SUBCLASS_ETHERNET, USB_CDC_PROTO_NONE),
 	.driver_info = 0,
 },
 

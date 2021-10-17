@@ -1,4 +1,4 @@
-/* Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2016, 2018, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -45,6 +45,17 @@
 #define VOLTE_RX_CAPTURE_DAI_ID  "VOLTE HOST RX CAPTURE"
 #define VOLTE_RX_PLAYBACK_DAI_ID "VOLTE HOST RX PLAYBACK"
 
+
+#define VoMMode1_TX_CAPTURE_DAI_ID  "VoiceMMode1 HOST TX CAPTURE"
+#define VoMMode1_TX_PLAYBACK_DAI_ID "VoiceMMode1 HOST TX PLAYBACK"
+#define VoMMode1_RX_CAPTURE_DAI_ID  "VoiceMMode1 HOST RX CAPTURE"
+#define VoMMode1_RX_PLAYBACK_DAI_ID "VoiceMMode1 HOST RX PLAYBACK"
+
+#define VoMMode2_TX_CAPTURE_DAI_ID  "VoiceMMode2 HOST TX CAPTURE"
+#define VoMMode2_TX_PLAYBACK_DAI_ID "VoiceMMode2 HOST TX PLAYBACK"
+#define VoMMode2_RX_CAPTURE_DAI_ID  "VoiceMMode2 HOST RX CAPTURE"
+#define VoMMode2_RX_PLAYBACK_DAI_ID "VoiceMMode2 HOST RX PLAYBACK"
+
 enum {
 	RX = 1,
 	TX,
@@ -53,6 +64,8 @@ enum {
 enum {
 	VOICE_INDEX = 0,
 	VOLTE_INDEX,
+	VOMMODE1_INDEX,
+	VOMMODE2_INDEX,
 	MAX_SESSION
 };
 
@@ -99,6 +112,8 @@ struct dai_data {
 struct tap_point {
 	struct dai_data playback_dai_data;
 	struct dai_data capture_dai_data;
+	struct vss_ivpcm_evt_notify_v2_t curr_event_data;
+	bool push_after_write;
 };
 
 struct session {
@@ -166,6 +181,10 @@ static char *hpcm_get_sess_name(int sess_indx)
 		sess_name = VOICE_SESSION_NAME;
 	else if (sess_indx == VOLTE_INDEX)
 		sess_name = VOLTE_SESSION_NAME;
+	else if (sess_indx == VOMMODE1_INDEX)
+		sess_name = VOICEMMODE1_NAME;
+	else if (sess_indx == VOMMODE2_INDEX)
+		sess_name = VOICEMMODE2_NAME;
 	else
 		pr_err("%s:, Invalid sess_index\n", __func__);
 
@@ -188,7 +207,7 @@ static void hpcm_reset_mixer_config(struct hpcm_drv *prtd)
 static bool hpcm_is_valid_config(int sess_indx, int tap_point,
 				 uint16_t direction, uint16_t samplerate)
 {
-	if (sess_indx < VOICE_INDEX || sess_indx > VOLTE_INDEX) {
+	if (sess_indx < VOICE_INDEX || sess_indx > VOMMODE2_INDEX) {
 		pr_err("%s: invalid sess_indx :%d\n", __func__, sess_indx);
 		goto error;
 	}
@@ -251,6 +270,33 @@ static struct dai_data *hpcm_get_dai_data(char *pcm_id, struct hpcm_drv *prtd)
 		} else if (strnstr(pcm_id, VOLTE_RX_PLAYBACK_DAI_ID, size)) {
 			dai_data =
 		&prtd->session[VOLTE_INDEX].rx_tap_point.playback_dai_data;
+		/* check for VoiceMMode1 DAI */
+		} else if (strnstr(pcm_id, VoMMode1_TX_CAPTURE_DAI_ID, size)) {
+			dai_data =
+		&prtd->session[VOMMODE1_INDEX].tx_tap_point.capture_dai_data;
+		} else if (strnstr(pcm_id, VoMMode1_TX_PLAYBACK_DAI_ID, size)) {
+			dai_data =
+		&prtd->session[VOMMODE1_INDEX].tx_tap_point.playback_dai_data;
+		} else if (strnstr(pcm_id, VoMMode1_RX_CAPTURE_DAI_ID, size)) {
+			dai_data =
+		&prtd->session[VOMMODE1_INDEX].rx_tap_point.capture_dai_data;
+		} else if (strnstr(pcm_id, VoMMode1_RX_PLAYBACK_DAI_ID, size)) {
+			dai_data =
+		&prtd->session[VOMMODE1_INDEX].rx_tap_point.playback_dai_data;
+		/* check for VOiceMMode2 DAI */
+		} else if (strnstr(pcm_id, VoMMode2_TX_CAPTURE_DAI_ID, size)) {
+			dai_data =
+		&prtd->session[VOMMODE2_INDEX].tx_tap_point.capture_dai_data;
+		} else if (strnstr(pcm_id, VoMMode2_TX_PLAYBACK_DAI_ID, size)) {
+			dai_data =
+		&prtd->session[VOMMODE2_INDEX].tx_tap_point.playback_dai_data;
+		} else if (strnstr(pcm_id, VoMMode2_RX_CAPTURE_DAI_ID, size)) {
+			dai_data =
+		&prtd->session[VOMMODE2_INDEX].rx_tap_point.capture_dai_data;
+		} else if (strnstr(pcm_id, VoMMode2_RX_PLAYBACK_DAI_ID, size)) {
+			dai_data =
+		&prtd->session[VOMMODE2_INDEX].rx_tap_point.playback_dai_data;
+
 		} else {
 			pr_err("%s: Wrong dai id\n", __func__);
 		}
@@ -285,6 +331,24 @@ static struct tap_point *hpcm_get_tappoint_data(char *pcm_id,
 			tp = &prtd->session[VOLTE_INDEX].rx_tap_point;
 		} else if (strnstr(pcm_id, VOLTE_RX_PLAYBACK_DAI_ID, size)) {
 			tp = &prtd->session[VOLTE_INDEX].rx_tap_point;
+		/* check for VoiceMMode1 */
+		} else if (strnstr(pcm_id, VoMMode1_TX_CAPTURE_DAI_ID, size)) {
+			tp = &prtd->session[VOMMODE1_INDEX].tx_tap_point;
+		} else if (strnstr(pcm_id, VoMMode1_TX_PLAYBACK_DAI_ID, size)) {
+			tp = &prtd->session[VOMMODE1_INDEX].tx_tap_point;
+		} else if (strnstr(pcm_id, VoMMode1_RX_CAPTURE_DAI_ID, size)) {
+			tp = &prtd->session[VOMMODE1_INDEX].rx_tap_point;
+		} else if (strnstr(pcm_id, VoMMode1_RX_PLAYBACK_DAI_ID, size)) {
+			tp = &prtd->session[VOMMODE1_INDEX].rx_tap_point;
+		/* check for VoiceMMode2 */
+		} else if (strnstr(pcm_id, VoMMode2_TX_CAPTURE_DAI_ID, size)) {
+			tp = &prtd->session[VOMMODE2_INDEX].tx_tap_point;
+		} else if (strnstr(pcm_id, VoMMode2_TX_PLAYBACK_DAI_ID, size)) {
+			tp = &prtd->session[VOMMODE2_INDEX].tx_tap_point;
+		} else if (strnstr(pcm_id, VoMMode2_RX_CAPTURE_DAI_ID, size)) {
+			tp = &prtd->session[VOMMODE2_INDEX].rx_tap_point;
+		} else if (strnstr(pcm_id, VoMMode2_RX_PLAYBACK_DAI_ID, size)) {
+			tp = &prtd->session[VOMMODE2_INDEX].rx_tap_point;
 		} else {
 			pr_err("%s: wrong dai id\n", __func__);
 		}
@@ -300,7 +364,11 @@ static struct tappnt_mxr_data *hpcm_get_tappnt_mixer_data(char *pcm_id,
 	if (strnstr(pcm_id, VOICE_TX_CAPTURE_DAI_ID, strlen(pcm_id)) ||
 	    strnstr(pcm_id, VOICE_TX_PLAYBACK_DAI_ID, strlen(pcm_id)) ||
 	    strnstr(pcm_id, VOLTE_TX_CAPTURE_DAI_ID, strlen(pcm_id)) ||
-	    strnstr(pcm_id, VOLTE_TX_PLAYBACK_DAI_ID, strlen(pcm_id))) {
+	    strnstr(pcm_id, VOLTE_TX_PLAYBACK_DAI_ID, strlen(pcm_id)) ||
+	    strnstr(pcm_id, VoMMode1_TX_CAPTURE_DAI_ID, strlen(pcm_id)) ||
+	    strnstr(pcm_id, VoMMode1_TX_PLAYBACK_DAI_ID, strlen(pcm_id)) ||
+	    strnstr(pcm_id, VoMMode2_TX_CAPTURE_DAI_ID, strlen(pcm_id)) ||
+	    strnstr(pcm_id, VoMMode2_TX_PLAYBACK_DAI_ID, strlen(pcm_id))) {
 		return &prtd->mixer_conf.tx;
 	} else {
 		return &prtd->mixer_conf.rx;
@@ -313,7 +381,11 @@ static int get_tappnt_value(char *pcm_id)
 	if (strnstr(pcm_id, VOICE_TX_CAPTURE_DAI_ID, strlen(pcm_id)) ||
 	    strnstr(pcm_id, VOICE_TX_PLAYBACK_DAI_ID, strlen(pcm_id)) ||
 	    strnstr(pcm_id, VOLTE_TX_CAPTURE_DAI_ID, strlen(pcm_id)) ||
-	    strnstr(pcm_id, VOLTE_TX_PLAYBACK_DAI_ID, strlen(pcm_id))) {
+	    strnstr(pcm_id, VOLTE_TX_PLAYBACK_DAI_ID, strlen(pcm_id)) ||
+	    strnstr(pcm_id, VoMMode1_TX_CAPTURE_DAI_ID, strlen(pcm_id)) ||
+	    strnstr(pcm_id, VoMMode1_TX_PLAYBACK_DAI_ID, strlen(pcm_id)) ||
+	    strnstr(pcm_id, VoMMode2_TX_CAPTURE_DAI_ID, strlen(pcm_id)) ||
+	    strnstr(pcm_id, VoMMode2_TX_PLAYBACK_DAI_ID, strlen(pcm_id))) {
 		return TX;
 	} else {
 		return RX;
@@ -504,7 +576,7 @@ static int hpcm_allocate_shared_memory(struct hpcm_drv *prtd)
 
 	sess->tp_mem_table.size = sizeof(struct vss_imemory_table_t);
 
-	pr_debug("%s: data %p phys %pa\n", __func__,
+	pr_debug("%s: data %pK phys %pK\n", __func__,
 		 sess->tp_mem_table.data, &sess->tp_mem_table.phys);
 
 	/* Split 4096 block into four 1024 byte blocks for each dai */
@@ -682,7 +754,7 @@ void hpcm_notify_evt_processing(uint8_t *data, char *session,
 	}
 
 	if (tp == NULL || tmd == NULL) {
-		pr_err("%s: tp = %p or tmd = %p is null\n", __func__,
+		pr_err("%s: tp = %pK or tmd = %pK is null\n", __func__,
 		       tp, tmd);
 
 		return;
@@ -691,11 +763,6 @@ void hpcm_notify_evt_processing(uint8_t *data, char *session,
 	if (notify_evt->notify_mask & VSS_IVPCM_NOTIFY_MASK_OUTPUT_BUFFER) {
 		hpcm_copy_capture_data_to_queue(&tp->capture_dai_data,
 						notify_evt->filled_out_size);
-	}
-
-	if (notify_evt->notify_mask & VSS_IVPCM_NOTIFY_MASK_INPUT_BUFFER) {
-		hpcm_copy_playback_data_from_queue(&tp->playback_dai_data,
-						   &in_buf_len);
 	}
 
 	switch (tmd->direction) {
@@ -708,20 +775,22 @@ void hpcm_notify_evt_processing(uint8_t *data, char *session,
 	 * VSS_IVPCM_PUSH_BUFFER_MASK_IN_BUFFER.
 	 */
 	case VSS_IVPCM_TAP_POINT_DIR_OUT_IN:
-		if (notify_evt->notify_mask ==
-		    VSS_IVPCM_NOTIFY_MASK_TIMETICK) {
-			push_buff_event.push_buf_mask =
-				VSS_IVPCM_PUSH_BUFFER_MASK_OUTPUT_BUFFER;
-		} else {
-			push_buff_event.push_buf_mask =
-			   VSS_IVPCM_PUSH_BUFFER_MASK_OUTPUT_BUFFER |
-			   VSS_IVPCM_PUSH_BUFFER_MASK_INPUT_BUFFER;
-		}
+		memcpy(&(tp->curr_event_data), notify_evt,
+		       sizeof(struct vss_ivpcm_evt_notify_v2_t));
+
+		tp->push_after_write = true;
+		push_buff_event.push_buf_mask =
+			VSS_IVPCM_PUSH_BUFFER_MASK_OUTPUT_BUFFER |
+			VSS_IVPCM_PUSH_BUFFER_MASK_INPUT_BUFFER;
 		break;
 
 	case VSS_IVPCM_TAP_POINT_DIR_IN:
-		push_buff_event.push_buf_mask =
-			VSS_IVPCM_PUSH_BUFFER_MASK_INPUT_BUFFER;
+		hpcm_copy_playback_data_from_queue(&tp->playback_dai_data,
+						   &in_buf_len);
+		if (in_buf_len != 0) {
+			push_buff_event.push_buf_mask =
+				VSS_IVPCM_PUSH_BUFFER_MASK_INPUT_BUFFER;
+		}
 		break;
 
 	case VSS_IVPCM_TAP_POINT_DIR_OUT:
@@ -729,32 +798,37 @@ void hpcm_notify_evt_processing(uint8_t *data, char *session,
 			 VSS_IVPCM_PUSH_BUFFER_MASK_OUTPUT_BUFFER;
 		break;
 	}
+	/*if not loopback push buff */
+	if (!(tp->push_after_write) ||
+	   (notify_evt->notify_mask == VSS_IVPCM_NOTIFY_MASK_TIMETICK)) {
+		push_buff_event.tap_point = notify_evt->tap_point;
+		push_buff_event.out_buf_mem_address =
+				tp->capture_dai_data.vocpcm_ion_buffer.paddr;
+		push_buff_event.in_buf_mem_address =
+			tp->playback_dai_data.vocpcm_ion_buffer.paddr;
+		push_buff_event.sampling_rate = notify_evt->sampling_rate;
+		push_buff_event.num_in_channels = 1;
 
-	push_buff_event.tap_point = notify_evt->tap_point;
-	push_buff_event.out_buf_mem_address =
-		      tp->capture_dai_data.vocpcm_ion_buffer.paddr;
-	push_buff_event.in_buf_mem_address =
-		      tp->playback_dai_data.vocpcm_ion_buffer.paddr;
-	push_buff_event.sampling_rate = notify_evt->sampling_rate;
-	push_buff_event.num_in_channels = 1;
-
-	/*
-	 * ADSP must read and write from a cache aligned (128 byte) location,
-	 * and in blocks of the cache alignment size. The 128 byte cache
-	 * alignment requirement is guaranteed due to 4096 byte memory
-	 * alignment requirement during memory allocation/mapping. The output
-	 * buffer (ADSP write) size mask ensures that a 128 byte multiple
-	 * worth of will be written.  Internally, the input buffer (ADSP read)
-	 * size will also be a multiple of 128 bytes.  However it is the
-	 * application's responsibility to ensure no other data is written in
-	 * the specified length of memory.
-	 */
-	push_buff_event.out_buf_mem_size = ((notify_evt->request_buf_size) +
-				CACHE_ALIGNMENT_SIZE) & CACHE_ALIGNMENT_MASK;
-	push_buff_event.in_buf_mem_size = in_buf_len;
-
-	voc_send_cvp_vocpcm_push_buf_evt(voc_get_session_id(sess_name),
-					 &push_buff_event);
+		/*
+		 * ADSP must read and write from a cache aligned (128 byte)
+		 * location, and in blocks of the cache alignment size.
+		 * The 128 byte cache alignment requirement is guaranteed due
+		 * to 4096 byte memory alignment requirement during memory
+		 * allocation/mapping. The output buffer (ADSP write) size mask
+		 *ensures that a 128 byte multiple worth of will be written.
+		 * Internally, the input buffer (ADSP read) size will also be
+		 * a multiple of 128 bytes.  However it is the application's
+		 * responsibility to ensure no other data is written in
+		 * the specified length of memory.
+		 */
+		push_buff_event.out_buf_mem_size =
+					((notify_evt->request_buf_size) +
+					CACHE_ALIGNMENT_SIZE) &
+					CACHE_ALIGNMENT_MASK;
+		push_buff_event.in_buf_mem_size = in_buf_len;
+		voc_send_cvp_vocpcm_push_buf_evt(voc_get_session_id(sess_name),
+						 &push_buff_event);
+	}
 }
 
 static int msm_hpcm_configure_voice_put(struct snd_kcontrol *kcontrol,
@@ -787,6 +861,78 @@ static int msm_hpcm_configure_voice_put(struct snd_kcontrol *kcontrol,
 	tmd->direction = direction;
 	tmd->sample_rate = sample_rate;
 	hpcm_drv.mixer_conf.sess_indx = VOICE_INDEX;
+
+done:
+	mutex_unlock(&hpcm_drv.lock);
+	return ret;
+}
+
+static int msm_hpcm_configure_vmmode1_put(struct snd_kcontrol *kcontrol,
+					  struct snd_ctl_elem_value *ucontrol)
+{
+
+	int tap_point = ucontrol->value.integer.value[0];
+	uint16_t direction = ucontrol->value.integer.value[1];
+	uint16_t sample_rate = ucontrol->value.integer.value[2];
+	struct tappnt_mxr_data *tmd = NULL;
+	int ret = 0;
+
+	mutex_lock(&hpcm_drv.lock);
+	pr_debug("%s: tap_point = %d direction = %d sample_rate = %d\n",
+		 __func__, tap_point, direction, sample_rate);
+
+	if (!hpcm_is_valid_config(VOMMODE1_INDEX, tap_point, direction,
+				  sample_rate)) {
+		pr_err("Invalid vpcm mixer control voice values\n");
+		ret = -EINVAL;
+		goto done;
+	}
+
+	if (tap_point == RX)
+		tmd = &hpcm_drv.mixer_conf.rx;
+	else
+		tmd = &hpcm_drv.mixer_conf.tx;
+
+	tmd->enable = true;
+	tmd->direction = direction;
+	tmd->sample_rate = sample_rate;
+	hpcm_drv.mixer_conf.sess_indx = VOMMODE1_INDEX;
+
+done:
+	mutex_unlock(&hpcm_drv.lock);
+	return ret;
+}
+
+static int msm_hpcm_configure_vmmode2_put(struct snd_kcontrol *kcontrol,
+					  struct snd_ctl_elem_value *ucontrol)
+{
+
+	int tap_point = ucontrol->value.integer.value[0];
+	uint16_t direction = ucontrol->value.integer.value[1];
+	uint16_t sample_rate = ucontrol->value.integer.value[2];
+	struct tappnt_mxr_data *tmd = NULL;
+	int ret = 0;
+
+	mutex_lock(&hpcm_drv.lock);
+	pr_debug("%s: tap_point = %d direction = %d sample_rate = %d\n",
+		 __func__, tap_point, direction, sample_rate);
+
+	if (!hpcm_is_valid_config(VOMMODE2_INDEX, tap_point, direction,
+				  sample_rate)) {
+		pr_err("Invalid vpcm mixer control voice values\n");
+		ret = -EINVAL;
+		goto done;
+	}
+
+	if (tap_point == RX)
+		tmd = &hpcm_drv.mixer_conf.rx;
+	else
+		tmd = &hpcm_drv.mixer_conf.tx;
+
+	tmd->enable = true;
+	tmd->direction = direction;
+	tmd->sample_rate = sample_rate;
+	hpcm_drv.mixer_conf.sess_indx = VOMMODE2_INDEX;
 
 done:
 	mutex_unlock(&hpcm_drv.lock);
@@ -837,6 +983,12 @@ static struct snd_kcontrol_new msm_hpcm_controls[] = {
 	SOC_SINGLE_MULTI_EXT("HPCM_VoLTE tappoint direction samplerate",
 			     SND_SOC_NOPM, 0, 16000 , 0, 3,
 			     NULL, msm_hpcm_configure_volte_put),
+	SOC_SINGLE_MULTI_EXT("HPCM_VMMode1 tappoint direction samplerate",
+			     SND_SOC_NOPM, 0, 16000 , 0, 3,
+			     NULL, msm_hpcm_configure_vmmode1_put),
+	SOC_SINGLE_MULTI_EXT("HPCM_VMMode2 tappoint direction samplerate",
+			     SND_SOC_NOPM, 0, 16000 , 0, 3,
+			     NULL, msm_hpcm_configure_vmmode2_put),
 };
 
 /* Sample rates supported */
@@ -948,8 +1100,20 @@ static int msm_pcm_playback_copy(struct snd_pcm_substream *substream, int a,
 	struct hpcm_drv *prtd = runtime->private_data;
 	struct dai_data *dai_data = hpcm_get_dai_data(substream->pcm->id, prtd);
 	unsigned long dsp_flags;
+	struct vss_ivpcm_evt_push_buffer_v2_t push_buff_event;
+	struct tap_point *tp = NULL;
+	int in_buf_len = 0;
+	char *sess_name = hpcm_get_sess_name(prtd->mixer_conf.sess_indx);
 
 	int count = frames_to_bytes(runtime, frames);
+
+	if (get_tappnt_value(substream->pcm->id) == TX) {
+		push_buff_event.push_buf_mask = VSS_IVPCM_TAP_POINT_TX_DEFAULT;
+		tp = &prtd->session[prtd->mixer_conf.sess_indx].tx_tap_point;
+	} else {
+		push_buff_event.push_buf_mask = VSS_IVPCM_TAP_POINT_RX_DEFAULT;
+		tp = &prtd->session[prtd->mixer_conf.sess_indx].rx_tap_point;
+	}
 
 	if (dai_data == NULL) {
 		pr_err("%s, dai_data is null\n", __func__);
@@ -987,7 +1151,41 @@ static int msm_pcm_playback_copy(struct snd_pcm_substream *substream, int a,
 	} else {
 		pr_err("%s: playback copy  was interrupted\n", __func__);
 	}
+	/* if in out copy data and push */
 
+	if (tp->push_after_write) {
+		hpcm_copy_playback_data_from_queue(dai_data,
+						  &in_buf_len);
+		if (in_buf_len) {
+			push_buff_event.push_buf_mask =
+			VSS_IVPCM_PUSH_BUFFER_MASK_OUTPUT_BUFFER |
+			VSS_IVPCM_PUSH_BUFFER_MASK_INPUT_BUFFER;
+		} else {
+			push_buff_event.push_buf_mask =
+			VSS_IVPCM_PUSH_BUFFER_MASK_OUTPUT_BUFFER;
+		}
+		push_buff_event.tap_point = tp->curr_event_data.tap_point;
+		push_buff_event.out_buf_mem_address =
+			tp->capture_dai_data.vocpcm_ion_buffer.paddr;
+		push_buff_event.in_buf_mem_address =
+			tp->playback_dai_data.vocpcm_ion_buffer.paddr;
+		push_buff_event.sampling_rate =
+					tp->curr_event_data.sampling_rate;
+		push_buff_event.num_in_channels = 1;
+		push_buff_event.out_buf_mem_size =
+				((tp->curr_event_data.request_buf_size) +
+			CACHE_ALIGNMENT_SIZE) & CACHE_ALIGNMENT_MASK;
+		push_buff_event.in_buf_mem_size = in_buf_len;
+
+		pr_debug("%s read_buf_mem_size= %d\n", __func__,
+			 push_buff_event.out_buf_mem_size);
+		pr_debug("%s write_buf_mem_size= %d\n", __func__,
+			 push_buff_event.in_buf_mem_size);
+		voc_send_cvp_vocpcm_push_buf_evt(voc_get_session_id(sess_name),
+						 &push_buff_event);
+		/*reset tp flags*/
+		tp->push_after_write = false;
+	}
 done:
 	return  ret;
 }

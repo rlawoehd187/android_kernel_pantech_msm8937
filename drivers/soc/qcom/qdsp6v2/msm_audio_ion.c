@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2016, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2013-2017, 2018 The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -20,6 +20,7 @@
 #include <linux/mutex.h>
 #include <linux/list.h>
 #include <linux/dma-mapping.h>
+#include <linux/dma-contiguous.h>
 #include <linux/dma-buf.h>
 #include <linux/iommu.h>
 #include <linux/platform_device.h>
@@ -28,7 +29,9 @@
 #include <linux/msm_audio_ion.h>
 #include <linux/export.h>
 #include <linux/qcom_iommu.h>
+#include <linux/cma.h>
 #include <asm/dma-iommu.h>
+#include <soc/qcom/scm.h>
 
 #define MSM_AUDIO_ION_PROBED (1 << 0)
 
@@ -39,6 +42,9 @@
 #define MSM_AUDIO_ION_VA_LEN 0x0FFFFFFF
 
 #define MSM_AUDIO_SMMU_SID_OFFSET 32
+
+#define TZBSP_MEM_PROTECT_AUDIO_CMD_ID 0x00000005
+#define TZBSP_MEM_PROTECT_AUDIO_CMD_ID_2 0x00000006
 
 struct addr_range {
 	dma_addr_t start;
@@ -52,6 +58,7 @@ struct context_bank_info {
 
 struct msm_audio_ion_private {
 	bool smmu_enabled;
+	bool scm_mp_enabled;
 	bool audioheap_enabled;
 	struct device *cb_dev;
 	struct dma_iommu_mapping *mapping;
@@ -70,6 +77,15 @@ struct msm_audio_alloc_data {
 	struct dma_buf_attachment *attach;
 	struct sg_table *table;
 	struct list_head list;
+};
+
+struct tz_mem_protect_cmd_buf {
+	phys_addr_t phys_addr;
+	unsigned long size;
+};
+
+struct tz_resp {
+	int32_t ret;
 };
 
 static struct msm_audio_ion_private msm_audio_ion_data = {0,};
@@ -157,11 +173,11 @@ int msm_audio_ion_alloc(const char *name, struct ion_client **client,
 		pr_err("%s: ION memory mapping for AUDIO failed\n", __func__);
 		goto err_ion_handle;
 	}
-	pr_debug("%s: mapped address = %p, size=%zd\n", __func__,
+	pr_debug("%s: mapped address = %pK, size=%zd\n", __func__,
 		*vaddr, bufsz);
 
 	if (bufsz != 0) {
-		pr_debug("%s: memset to 0 %p %zd\n", __func__, *vaddr, bufsz);
+		pr_debug("%s: memset to 0 %pK %zd\n", __func__, *vaddr, bufsz);
 		memset((void *)*vaddr, 0, bufsz);
 	}
 
@@ -208,7 +224,7 @@ int msm_audio_ion_import(const char *name, struct ion_client **client,
 	bufsz should be 0 and fd shouldn't be 0 as of now
 	*/
 	*handle = ion_import_dma_buf(*client, fd);
-	pr_debug("%s: DMA Buf name=%s, fd=%d handle=%p\n", __func__,
+	pr_debug("%s: DMA Buf name=%s, fd=%d handle=%pK\n", __func__,
 							name, fd, *handle);
 	if (IS_ERR_OR_NULL((void *) (*handle))) {
 		pr_err("%s: ion import dma buffer failed\n",
@@ -239,7 +255,7 @@ int msm_audio_ion_import(const char *name, struct ion_client **client,
 		rc = -ENOMEM;
 		goto err_ion_handle;
 	}
-	pr_debug("%s: mapped address = %p, size=%zd\n", __func__,
+	pr_debug("%s: mapped address = %pK, size=%zd\n", __func__,
 		*vaddr, bufsz);
 
 	return 0;
@@ -321,7 +337,7 @@ int msm_audio_ion_mmap(struct audio_buffer *ab,
 				offset = 0;
 			}
 			len = min(len, remainder);
-			pr_debug("vma=%p, addr=%x len=%ld vm_start=%x vm_end=%x vm_page_prot=%ld\n",
+			pr_debug("vma=%pK, addr=%x len=%ld vm_start=%x vm_end=%x vm_page_prot=%ld\n",
 				vma, (unsigned int)addr, len,
 				(unsigned int)vma->vm_start,
 				(unsigned int)vma->vm_end,
@@ -344,8 +360,8 @@ int msm_audio_ion_mmap(struct audio_buffer *ab,
 				, __func__ , ret);
 			return ret;
 		}
-		pr_debug("phys=%pa len=%zd\n", &phys_addr, phys_len);
-		pr_debug("vma=%p, vm_start=%x vm_end=%x vm_pgoff=%ld vm_page_prot=%ld\n",
+		pr_debug("phys=%pK len=%zd\n", &phys_addr, phys_len);
+		pr_debug("vma=%pK, vm_start=%x vm_end=%x vm_pgoff=%ld vm_page_prot=%ld\n",
 			vma, (unsigned int)vma->vm_start,
 			(unsigned int)vma->vm_end, vma->vm_pgoff,
 			(unsigned long int)vma->vm_page_prot);
@@ -380,7 +396,7 @@ struct ion_client *msm_audio_ion_client_create(const char *name)
 
 void msm_audio_ion_client_destroy(struct ion_client *client)
 {
-	pr_debug("%s: client = %p smmu_enabled = %d\n", __func__,
+	pr_debug("%s: client = %pK smmu_enabled = %d\n", __func__,
 		client, msm_audio_ion_data.smmu_enabled);
 
 	ion_client_destroy(client);
@@ -402,7 +418,7 @@ int msm_audio_ion_import_legacy(const char *name, struct ion_client *client,
 	bufsz should be 0 and fd shouldn't be 0 as of now
 	*/
 	*handle = ion_import_dma_buf(client, fd);
-	pr_debug("%s: DMA Buf name=%s, fd=%d handle=%p\n", __func__,
+	pr_debug("%s: DMA Buf name=%s, fd=%d handle=%pK\n", __func__,
 							name, fd, *handle);
 	if (IS_ERR_OR_NULL((void *)(*handle))) {
 		pr_err("%s: ion import dma buffer failed\n",
@@ -468,7 +484,7 @@ int msm_audio_ion_cache_operations(struct audio_buffer *abuff, int cache_op)
 	int msm_cache_ops = 0;
 
 	if (!abuff) {
-		pr_err("Invalid params: %p, %p\n", __func__, abuff);
+		pr_err("%s: Invalid params: %pK\n", __func__, abuff);
 		return -EINVAL;
 	}
 	rc = ion_handle_get_flags(abuff->client, abuff->handle,
@@ -641,7 +657,7 @@ static int msm_audio_dma_buf_unmap(struct ion_client *client,
 
 	if (!found) {
 		dev_err(cb_dev,
-			"%s: cannot find allocation, ion_handle %p, ion_client %p",
+			"%s: cannot find allocation, ion_handle %pK, ion_client %pK",
 			__func__, handle, client);
 		rc = -EINVAL;
 	}
@@ -671,7 +687,7 @@ static int msm_audio_ion_get_phys(struct ion_client *client,
 		rc = ion_phys(client, handle, addr, len);
 	}
 
-	pr_debug("phys=%pa, len=%zd, rc=%d\n", &(*addr), *len, rc);
+	pr_debug("phys=%pK, len=%zd, rc=%d\n", &(*addr), *len, rc);
 err:
 	return rc;
 }
@@ -740,13 +756,15 @@ fail_attach:
 static int msm_audio_smmu_init(struct device *dev)
 {
 	struct dma_iommu_mapping *mapping;
-	int ret;
+	int ret = 0;
 	int disable_htw = 1;
 
 	mapping = arm_iommu_create_mapping(
 					msm_iommu_get_bus(dev),
 					   MSM_AUDIO_ION_VA_START,
 					   MSM_AUDIO_ION_VA_LEN);
+	if (mapping == NULL)
+		goto fail_attach;
 	if (IS_ERR(mapping))
 		return PTR_ERR(mapping);
 
@@ -796,12 +814,49 @@ u32 msm_audio_populate_upper_32_bits(ion_phys_addr_t pa)
 		return upper_32_bits(pa);
 }
 
+static int msm_audio_protect_memory_region(struct device *dev)
+{
+	int ret = 0;
+	unsigned long size = 0;
+	phys_addr_t phys_addr = 0;
+	struct scm_desc desc2 = {0};
+	struct tz_mem_protect_cmd_buf desc = {0};
+	struct tz_resp resp = {0};
+
+	phys_addr = cma_get_base(dev_get_cma_area(dev));
+	size = cma_get_size(dev_get_cma_area(dev));
+
+	pr_debug("%s: cma_audio_mem_addr %pK with size %lu\n",
+		 __func__, &phys_addr, size);
+
+	desc2.args[0] = desc.phys_addr = phys_addr;
+	desc2.args[1] = desc.size = size;
+	desc2.arginfo = SCM_ARGS(2);
+	if (!is_scm_armv8()) {
+		ret = scm_call(SCM_SVC_MP, TZBSP_MEM_PROTECT_AUDIO_CMD_ID,
+			(void *)&desc , sizeof(desc),
+			 (void *)&resp, sizeof(resp));
+	} else {
+		ret = scm_call2(SCM_SIP_FNID(SCM_SVC_MP,
+			TZBSP_MEM_PROTECT_AUDIO_CMD_ID_2), &desc2);
+		resp.ret = desc2.ret[0];
+	}
+	if (ret < 0)
+		pr_err("%s: SCM call failed, scm_call_ret %d tz_resp %d\n",
+		       __func__, ret, resp.ret);
+	if (!is_scm_armv8())
+		return ret;
+	return desc2.ret[0];
+}
+
 static int msm_audio_ion_probe(struct platform_device *pdev)
 {
 	int rc = 0;
 	const char *msm_audio_ion_dt = "qcom,smmu-enabled";
 	const char *msm_audio_ion_smmu = "qcom,smmu-version";
+	const char *mdm_audio_ion_scm = "qcom,scm-mp-enabled";
 	bool smmu_enabled;
+	bool scm_mp_enabled;
 	enum apr_subsys_state q6_state;
 	struct device *dev = &pdev->dev;
 
@@ -812,6 +867,13 @@ static int msm_audio_ion_probe(struct platform_device *pdev)
 		msm_audio_ion_data.smmu_enabled = 0;
 		return 0;
 	}
+
+	scm_mp_enabled = of_property_read_bool(dev->of_node,
+					mdm_audio_ion_scm);
+	msm_audio_ion_data.scm_mp_enabled = scm_mp_enabled;
+
+	if (scm_mp_enabled)
+		msm_audio_protect_memory_region(dev);
 
 	smmu_enabled = of_property_read_bool(dev->of_node,
 					     msm_audio_ion_dt);

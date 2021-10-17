@@ -27,11 +27,12 @@
  *
  * Handles spurious and unhandled IRQ's. It also prints a debugmessage.
  */
-void handle_bad_irq(unsigned int irq, struct irq_desc *desc)
+bool handle_bad_irq(unsigned int irq, struct irq_desc *desc)
 {
 	print_irq_desc(irq, desc);
 	kstat_incr_irqs_this_cpu(irq, desc);
 	ack_bad_irq(irq);
+	return true;
 }
 
 /*
@@ -136,7 +137,8 @@ handle_irq_event_percpu(struct irq_desc *desc, struct irqaction *action)
 	irqreturn_t retval = IRQ_NONE;
 	unsigned int flags = 0, irq = desc->irq_data.irq;
 
-	do {
+	/* action might have become NULL since we dropped the lock */
+	while (action) {
 		irqreturn_t res;
 
 		trace_irq_handler_entry(irq, action);
@@ -171,7 +173,7 @@ handle_irq_event_percpu(struct irq_desc *desc, struct irqaction *action)
 
 		retval |= res;
 		action = action->next;
-	} while (action);
+	}
 
 	add_interrupt_randomness(irq, flags);
 

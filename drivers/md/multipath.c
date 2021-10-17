@@ -129,7 +129,9 @@ static void multipath_make_request(struct mddev *mddev, struct bio * bio)
 	}
 	multipath = conf->multipaths + mp_bh->path;
 
-	mp_bh->bio = *bio;
+	bio_init(&mp_bh->bio);
+	__bio_clone_fast(&mp_bh->bio, bio);
+
 	mp_bh->bio.bi_iter.bi_sector += multipath->rdev->data_offset;
 	mp_bh->bio.bi_bdev = multipath->rdev->bdev;
 	mp_bh->bio.bi_rw |= REQ_FAILFAST_TRANSPORT;
@@ -273,6 +275,9 @@ static int multipath_add_disk(struct mddev *mddev, struct md_rdev *rdev)
 							   PAGE_CACHE_SIZE - 1);
 			}
 
+			err = md_integrity_add_rdev(rdev, mddev);
+			if (err)
+				break;
 			spin_lock_irq(&conf->device_lock);
 			mddev->degraded--;
 			rdev->raid_disk = path;
@@ -280,7 +285,6 @@ static int multipath_add_disk(struct mddev *mddev, struct md_rdev *rdev)
 			spin_unlock_irq(&conf->device_lock);
 			rcu_assign_pointer(p->rdev, rdev);
 			err = 0;
-			md_integrity_add_rdev(rdev, mddev);
 			break;
 		}
 

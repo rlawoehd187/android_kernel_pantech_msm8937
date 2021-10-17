@@ -1,4 +1,4 @@
-/* Copyright (c) 2013-2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2017, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -19,6 +19,8 @@
 #include <linux/clk/msm-clock-generic.h>
 #include <linux/of_address.h>
 #include <linux/dma-mapping.h>
+#include <linux/vmalloc.h>
+#include <linux/memblock.h>
 
 #include "mdss-pll.h"
 
@@ -216,7 +218,7 @@ static int mdss_pll_util_parse_dt_supply(struct platform_device *pdev,
 			pr_err(": error reading enable load. rc=%d\n", rc);
 			goto error;
 		}
-		mp->vreg_config[i].enable_load = tmp;
+		mp->vreg_config[i].load[DSS_REG_MODE_ENABLE] = tmp;
 
 		rc = of_property_read_u32(supply_node,
 					"qcom,supply-disable-load", &tmp);
@@ -224,7 +226,15 @@ static int mdss_pll_util_parse_dt_supply(struct platform_device *pdev,
 			pr_err(": error reading disable load. rc=%d\n", rc);
 			goto error;
 		}
-		mp->vreg_config[i].disable_load = tmp;
+		mp->vreg_config[i].load[DSS_REG_MODE_DISABLE] = tmp;
+
+		rc = of_property_read_u32(supply_node,
+					"qcom,supply-ulp-load", &tmp);
+		if (rc)
+			pr_warn(": error reading ulp load. rc=%d\n", rc);
+
+		mp->vreg_config[i].load[DSS_REG_MODE_ULP] = (!rc ? tmp :
+			mp->vreg_config[i].load[DSS_REG_MODE_ENABLE]);
 
 		rc = of_property_read_u32(supply_node,
 					"qcom,supply-pre-on-sleep", &tmp);
@@ -258,16 +268,17 @@ static int mdss_pll_util_parse_dt_supply(struct platform_device *pdev,
 
 		mp->vreg_config[i].post_off_sleep = (!rc ? tmp : 0);
 
-		pr_debug("%s min=%d, max=%d, enable=%d, disable=%d, preonsleep=%d, postonsleep=%d, preoffsleep=%d, postoffsleep=%d\n",
-					mp->vreg_config[i].vreg_name,
-					mp->vreg_config[i].min_voltage,
-					mp->vreg_config[i].max_voltage,
-					mp->vreg_config[i].enable_load,
-					mp->vreg_config[i].disable_load,
-					mp->vreg_config[i].pre_on_sleep,
-					mp->vreg_config[i].post_on_sleep,
-					mp->vreg_config[i].pre_off_sleep,
-					mp->vreg_config[i].post_off_sleep);
+		pr_debug("%s min=%d, max=%d, enable=%d, disable=%d, ulp=%d, preonsleep=%d, postonsleep=%d, preoffsleep=%d, postoffsleep=%d\n",
+			mp->vreg_config[i].vreg_name,
+			mp->vreg_config[i].min_voltage,
+			mp->vreg_config[i].max_voltage,
+			mp->vreg_config[i].load[DSS_REG_MODE_ENABLE],
+			mp->vreg_config[i].load[DSS_REG_MODE_DISABLE],
+			mp->vreg_config[i].load[DSS_REG_MODE_ULP],
+			mp->vreg_config[i].pre_on_sleep,
+			mp->vreg_config[i].post_on_sleep,
+			mp->vreg_config[i].pre_off_sleep,
+			mp->vreg_config[i].post_off_sleep);
 		++i;
 
 		rc = 0;
@@ -329,12 +340,26 @@ clk_err:
 	return rc;
 }
 
+static void mdss_pll_free_bootmem(u32 mem_addr, u32 size)
+{
+	unsigned long pfn_start, pfn_end, pfn_idx;
+
+	pfn_start = mem_addr >> PAGE_SHIFT;
+	pfn_end = (mem_addr + size) >> PAGE_SHIFT;
+	for (pfn_idx = pfn_start; pfn_idx < pfn_end; pfn_idx++)
+		free_reserved_page(pfn_to_page(pfn_idx));
+}
+
 static int mdss_pll_util_parse_dt_dfps(struct platform_device *pdev,
 					struct mdss_pll_resources *pll_res)
 {
 	int rc = 0;
 	struct device_node *pnode;
-	void __iomem *addr;
+	const u32 *addr;
+	struct vm_struct *area;
+	u64 size;
+	u32 offsets[2];
+	unsigned long virt_add;
 
 	pnode = of_parse_phandle(pdev->dev.of_node, "memory-region", 0);
 	if (IS_ERR_OR_NULL(pnode)) {
@@ -342,13 +367,29 @@ static int mdss_pll_util_parse_dt_dfps(struct platform_device *pdev,
 		goto pnode_err;
 	}
 
-	/* get the physical address for pll codes */
-	addr = of_iomap(pnode, 0);
-	if (IS_ERR_OR_NULL(addr)) {
-			rc = PTR_ERR(addr);
-			pr_err("couldn't get dfps physical address\n");
-			goto pnode_err;
-		}
+	addr = of_get_address(pnode, 0, &size, NULL);
+	if (!addr) {
+		pr_err("failed to parse the dfps memory address\n");
+		rc = -EINVAL;
+		goto pnode_err;
+	}
+	/* maintain compatibility for 32/64 bit */
+	offsets[0] = (u32) of_read_ulong(addr, 2);
+	offsets[1] = (u32) size;
+
+	area = get_vm_area(offsets[1], VM_IOREMAP);
+	if (!area) {
+		rc = -ENOMEM;
+		goto dfps_mem_err;
+	}
+
+	virt_add = (unsigned long)area->addr;
+	rc = ioremap_page_range(virt_add, (virt_add + offsets[1]),
+			offsets[0], PAGE_KERNEL);
+	if (rc) {
+		rc = -ENOMEM;
+		goto ioremap_err;
+	}
 
 	pll_res->dfps = kzalloc(sizeof(struct dfps_info), GFP_KERNEL);
 	if (IS_ERR_OR_NULL(pll_res->dfps)) {
@@ -357,12 +398,19 @@ static int mdss_pll_util_parse_dt_dfps(struct platform_device *pdev,
 		goto addr_err;
 	}
 
-	/* memcopy complete dfps structure from physical memory */
-	memcpy_fromio(pll_res->dfps, addr, sizeof(struct dfps_info));
+	/* memcopy complete dfps structure from kernel virtual memory */
+	memcpy_fromio(pll_res->dfps, area->addr, sizeof(struct dfps_info));
 
 addr_err:
-	iounmap(addr);
-
+	if (virt_add)
+		unmap_kernel_range(virt_add, (unsigned long) size);
+ioremap_err:
+	if (area)
+		vfree(area->addr);
+dfps_mem_err:
+	/* free the dfps memory here */
+	memblock_free(offsets[0], offsets[1]);
+	mdss_pll_free_bootmem(offsets[0], offsets[1]);
 pnode_err:
 	if (pnode)
 		of_node_put(pnode);

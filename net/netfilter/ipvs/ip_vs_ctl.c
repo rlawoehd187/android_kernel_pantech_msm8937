@@ -97,7 +97,6 @@ static bool __ip_vs_addr_is_local_v6(struct net *net,
 static void update_defense_level(struct netns_ipvs *ipvs)
 {
 	struct sysinfo i;
-	static int old_secure_tcp = 0;
 	int availmem;
 	int nomem;
 	int to_change = -1;
@@ -178,35 +177,35 @@ static void update_defense_level(struct netns_ipvs *ipvs)
 	spin_lock(&ipvs->securetcp_lock);
 	switch (ipvs->sysctl_secure_tcp) {
 	case 0:
-		if (old_secure_tcp >= 2)
+		if (ipvs->old_secure_tcp >= 2)
 			to_change = 0;
 		break;
 	case 1:
 		if (nomem) {
-			if (old_secure_tcp < 2)
+			if (ipvs->old_secure_tcp < 2)
 				to_change = 1;
 			ipvs->sysctl_secure_tcp = 2;
 		} else {
-			if (old_secure_tcp >= 2)
+			if (ipvs->old_secure_tcp >= 2)
 				to_change = 0;
 		}
 		break;
 	case 2:
 		if (nomem) {
-			if (old_secure_tcp < 2)
+			if (ipvs->old_secure_tcp < 2)
 				to_change = 1;
 		} else {
-			if (old_secure_tcp >= 2)
+			if (ipvs->old_secure_tcp >= 2)
 				to_change = 0;
 			ipvs->sysctl_secure_tcp = 1;
 		}
 		break;
 	case 3:
-		if (old_secure_tcp < 2)
+		if (ipvs->old_secure_tcp < 2)
 			to_change = 1;
 		break;
 	}
-	old_secure_tcp = ipvs->sysctl_secure_tcp;
+	ipvs->old_secure_tcp = ipvs->sysctl_secure_tcp;
 	if (to_change >= 0)
 		ip_vs_protocol_timeout_change(ipvs,
 					      ipvs->sysctl_secure_tcp > 1);
@@ -828,15 +827,16 @@ __ip_vs_update_dest(struct ip_vs_service *svc, struct ip_vs_dest *dest,
 	__ip_vs_dst_cache_reset(dest);
 	spin_unlock_bh(&dest->dst_lock);
 
-	sched = rcu_dereference_protected(svc->scheduler, 1);
 	if (add) {
 		ip_vs_start_estimator(svc->net, &dest->stats);
 		list_add_rcu(&dest->n_list, &svc->destinations);
 		svc->num_dests++;
-		if (sched->add_dest)
+		sched = rcu_dereference_protected(svc->scheduler, 1);
+		if (sched && sched->add_dest)
 			sched->add_dest(svc, dest);
 	} else {
-		if (sched->upd_dest)
+		sched = rcu_dereference_protected(svc->scheduler, 1);
+		if (sched && sched->upd_dest)
 			sched->upd_dest(svc, dest);
 	}
 }
@@ -1070,7 +1070,7 @@ static void __ip_vs_unlink_dest(struct ip_vs_service *svc,
 		struct ip_vs_scheduler *sched;
 
 		sched = rcu_dereference_protected(svc->scheduler, 1);
-		if (sched->del_dest)
+		if (sched && sched->del_dest)
 			sched->del_dest(svc, dest);
 	}
 }
@@ -1161,11 +1161,14 @@ ip_vs_add_service(struct net *net, struct ip_vs_service_user_kern *u,
 	ip_vs_use_count_inc();
 
 	/* Lookup the scheduler by 'u->sched_name' */
-	sched = ip_vs_scheduler_get(u->sched_name);
-	if (sched == NULL) {
-		pr_info("Scheduler module ip_vs_%s not found\n", u->sched_name);
-		ret = -ENOENT;
-		goto out_err;
+	if (strcmp(u->sched_name, "none")) {
+		sched = ip_vs_scheduler_get(u->sched_name);
+		if (!sched) {
+			pr_info("Scheduler module ip_vs_%s not found\n",
+				u->sched_name);
+			ret = -ENOENT;
+			goto out_err;
+		}
 	}
 
 	if (u->pe_name && *u->pe_name) {
@@ -1226,10 +1229,12 @@ ip_vs_add_service(struct net *net, struct ip_vs_service_user_kern *u,
 	spin_lock_init(&svc->stats.lock);
 
 	/* Bind the scheduler */
-	ret = ip_vs_bind_scheduler(svc, sched);
-	if (ret)
-		goto out_err;
-	sched = NULL;
+	if (sched) {
+		ret = ip_vs_bind_scheduler(svc, sched);
+		if (ret)
+			goto out_err;
+		sched = NULL;
+	}
 
 	/* Bind the ct retriever */
 	RCU_INIT_POINTER(svc->pe, pe);
@@ -1277,17 +1282,20 @@ ip_vs_add_service(struct net *net, struct ip_vs_service_user_kern *u,
 static int
 ip_vs_edit_service(struct ip_vs_service *svc, struct ip_vs_service_user_kern *u)
 {
-	struct ip_vs_scheduler *sched, *old_sched;
+	struct ip_vs_scheduler *sched = NULL, *old_sched;
 	struct ip_vs_pe *pe = NULL, *old_pe = NULL;
 	int ret = 0;
 
 	/*
 	 * Lookup the scheduler, by 'u->sched_name'
 	 */
-	sched = ip_vs_scheduler_get(u->sched_name);
-	if (sched == NULL) {
-		pr_info("Scheduler module ip_vs_%s not found\n", u->sched_name);
-		return -ENOENT;
+	if (strcmp(u->sched_name, "none")) {
+		sched = ip_vs_scheduler_get(u->sched_name);
+		if (!sched) {
+			pr_info("Scheduler module ip_vs_%s not found\n",
+				u->sched_name);
+			return -ENOENT;
+		}
 	}
 	old_sched = sched;
 
@@ -1315,14 +1323,20 @@ ip_vs_edit_service(struct ip_vs_service *svc, struct ip_vs_service_user_kern *u)
 
 	old_sched = rcu_dereference_protected(svc->scheduler, 1);
 	if (sched != old_sched) {
-		/* Bind the new scheduler */
-		ret = ip_vs_bind_scheduler(svc, sched);
-		if (ret) {
-			old_sched = sched;
-			goto out;
+		if (old_sched) {
+			ip_vs_unbind_scheduler(svc, old_sched);
+			RCU_INIT_POINTER(svc->scheduler, NULL);
+			/* Wait all svc->sched_data users */
+			synchronize_rcu();
 		}
-		/* Unbind the old scheduler on success */
-		ip_vs_unbind_scheduler(svc, old_sched);
+		/* Bind the new scheduler */
+		if (sched) {
+			ret = ip_vs_bind_scheduler(svc, sched);
+			if (ret) {
+				ip_vs_scheduler_put(sched);
+				goto out;
+			}
+		}
 	}
 
 	/*
@@ -1962,6 +1976,7 @@ static int ip_vs_info_seq_show(struct seq_file *seq, void *v)
 		const struct ip_vs_iter *iter = seq->private;
 		const struct ip_vs_dest *dest;
 		struct ip_vs_scheduler *sched = rcu_dereference(svc->scheduler);
+		char *sched_name = sched ? sched->name : "none";
 
 		if (iter->table == ip_vs_svc_table) {
 #ifdef CONFIG_IP_VS_IPV6
@@ -1970,18 +1985,18 @@ static int ip_vs_info_seq_show(struct seq_file *seq, void *v)
 					   ip_vs_proto_name(svc->protocol),
 					   &svc->addr.in6,
 					   ntohs(svc->port),
-					   sched->name);
+					   sched_name);
 			else
 #endif
 				seq_printf(seq, "%s  %08X:%04X %s %s ",
 					   ip_vs_proto_name(svc->protocol),
 					   ntohl(svc->addr.ip),
 					   ntohs(svc->port),
-					   sched->name,
+					   sched_name,
 					   (svc->flags & IP_VS_SVC_F_ONEPACKET)?"ops ":"");
 		} else {
 			seq_printf(seq, "FWM  %08X %s %s",
-				   svc->fwmark, sched->name,
+				   svc->fwmark, sched_name,
 				   (svc->flags & IP_VS_SVC_F_ONEPACKET)?"ops ":"");
 		}
 
@@ -2167,6 +2182,18 @@ static int ip_vs_set_timeout(struct net *net, struct ip_vs_timeout_user *u)
 		  u->udp_timeout);
 
 #ifdef CONFIG_IP_VS_PROTO_TCP
+	if (u->tcp_timeout < 0 || u->tcp_timeout > (INT_MAX / HZ) ||
+	    u->tcp_fin_timeout < 0 || u->tcp_fin_timeout > (INT_MAX / HZ)) {
+		return -EINVAL;
+	}
+#endif
+
+#ifdef CONFIG_IP_VS_PROTO_UDP
+	if (u->udp_timeout < 0 || u->udp_timeout > (INT_MAX / HZ))
+		return -EINVAL;
+#endif
+
+#ifdef CONFIG_IP_VS_PROTO_TCP
 	if (u->tcp_timeout) {
 		pd = ip_vs_proto_data_get(net, IPPROTO_TCP);
 		pd->timeout_table[IP_VS_TCP_S_ESTABLISHED]
@@ -2313,6 +2340,10 @@ do_ip_vs_set_ctl(struct sock *sk, int cmd, void __user *user, unsigned int len)
 		/* Set timeout values for (tcp tcpfin udp) */
 		ret = ip_vs_set_timeout(net, (struct ip_vs_timeout_user *)arg);
 		goto out_unlock;
+	} else if (!len) {
+		/* No more commands with len == 0 below */
+		ret = -EINVAL;
+		goto out_unlock;
 	}
 
 	usvc_compat = (struct ip_vs_service_user *)arg;
@@ -2382,9 +2413,6 @@ do_ip_vs_set_ctl(struct sock *sk, int cmd, void __user *user, unsigned int len)
 		break;
 	case IP_VS_SO_SET_DELDEST:
 		ret = ip_vs_del_dest(svc, &udest);
-		break;
-	default:
-		ret = -EINVAL;
 	}
 
   out_unlock:
@@ -2401,13 +2429,15 @@ static void
 ip_vs_copy_service(struct ip_vs_service_entry *dst, struct ip_vs_service *src)
 {
 	struct ip_vs_scheduler *sched;
+	char *sched_name;
 
 	sched = rcu_dereference_protected(src->scheduler, 1);
+	sched_name = sched ? sched->name : "none";
 	dst->protocol = src->protocol;
 	dst->addr = src->addr.ip;
 	dst->port = src->port;
 	dst->fwmark = src->fwmark;
-	strlcpy(dst->sched_name, sched->name, sizeof(dst->sched_name));
+	strlcpy(dst->sched_name, sched_name, sizeof(dst->sched_name));
 	dst->flags = src->flags;
 	dst->timeout = src->timeout / HZ;
 	dst->netmask = src->netmask;
@@ -2741,7 +2771,7 @@ static struct genl_family ip_vs_genl_family = {
 	.hdrsize	= 0,
 	.name		= IPVS_GENL_NAME,
 	.version	= IPVS_GENL_VERSION,
-	.maxattr	= IPVS_CMD_MAX,
+	.maxattr	= IPVS_CMD_ATTR_MAX,
 	.netnsok        = true,         /* Make ipvsadm to work on netns */
 };
 
@@ -2836,6 +2866,7 @@ static int ip_vs_genl_fill_service(struct sk_buff *skb,
 	struct nlattr *nl_service;
 	struct ip_vs_flags flags = { .flags = svc->flags,
 				     .mask = ~0 };
+	char *sched_name;
 
 	nl_service = nla_nest_start(skb, IPVS_CMD_ATTR_SERVICE);
 	if (!nl_service)
@@ -2854,8 +2885,9 @@ static int ip_vs_genl_fill_service(struct sk_buff *skb,
 	}
 
 	sched = rcu_dereference_protected(svc->scheduler, 1);
+	sched_name = sched ? sched->name : "none";
 	pe = rcu_dereference_protected(svc->pe, 1);
-	if (nla_put_string(skb, IPVS_SVC_ATTR_SCHED_NAME, sched->name) ||
+	if (nla_put_string(skb, IPVS_SVC_ATTR_SCHED_NAME, sched_name) ||
 	    (pe && nla_put_string(skb, IPVS_SVC_ATTR_PE_NAME, pe->name)) ||
 	    nla_put(skb, IPVS_SVC_ATTR_FLAGS, sizeof(flags), &flags) ||
 	    nla_put_u32(skb, IPVS_SVC_ATTR_TIMEOUT, svc->timeout / HZ) ||

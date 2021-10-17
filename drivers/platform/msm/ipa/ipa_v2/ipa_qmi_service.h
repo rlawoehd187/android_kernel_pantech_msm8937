@@ -1,4 +1,4 @@
-/* Copyright (c) 2013-2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2017, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -31,11 +31,42 @@
 #define SUBSYS_MODEM "modem"
 
 #define IPAWANDBG(fmt, args...) \
-	pr_debug(DEV_NAME " %s:%d " fmt, __func__, __LINE__, ## args)
+	do { \
+		pr_debug(DEV_NAME " %s:%d " fmt, __func__, __LINE__, ## args); \
+		IPA_IPC_LOGGING(ipa_get_ipc_logbuf(), \
+			DEV_NAME " %s:%d " fmt, ## args); \
+		IPA_IPC_LOGGING(ipa_get_ipc_logbuf_low(), \
+			DEV_NAME " %s:%d " fmt, ## args); \
+	} while (0)
+
+#define IPAWANDBG_LOW(fmt, args...) \
+	do { \
+		pr_debug(DEV_NAME " %s:%d " fmt, __func__, __LINE__, ## args); \
+		IPA_IPC_LOGGING(ipa_get_ipc_logbuf_low(), \
+			DEV_NAME " %s:%d " fmt, ## args); \
+	} while (0)
+
 #define IPAWANERR(fmt, args...) \
-	pr_err(DEV_NAME " %s:%d " fmt, __func__, __LINE__, ## args)
+	do { \
+		pr_err(DEV_NAME " %s:%d " fmt, __func__, __LINE__, ## args); \
+		IPA_IPC_LOGGING(ipa_get_ipc_logbuf(), \
+			DEV_NAME " %s:%d " fmt, ## args); \
+		IPA_IPC_LOGGING(ipa_get_ipc_logbuf_low(), \
+			DEV_NAME " %s:%d " fmt, ## args); \
+	} while (0)
+
+#define IPAWANINFO(fmt, args...) \
+	do { \
+		pr_info(DEV_NAME " %s:%d " fmt, __func__, __LINE__, ## args); \
+		IPA_IPC_LOGGING(ipa_get_ipc_logbuf(), \
+			DEV_NAME " %s:%d " fmt, ## args); \
+		IPA_IPC_LOGGING(ipa_get_ipc_logbuf_low(), \
+			DEV_NAME " %s:%d " fmt, ## args); \
+	} while (0)
+
 
 extern struct ipa_qmi_context *ipa_qmi_ctx;
+extern struct mutex ipa_qmi_lock;
 
 struct ipa_qmi_context {
 struct ipa_ioc_ext_intf_prop q6_ul_filter_rule[MAX_NUM_Q6_RULE];
@@ -145,6 +176,9 @@ int rmnet_ipa_set_tether_client_pipe(struct wan_ioctl_set_tether_client_pipe
 int rmnet_ipa_query_tethering_stats(struct wan_ioctl_query_tether_stats *data,
 	bool reset);
 
+int rmnet_ipa_query_tethering_stats_all(
+	struct wan_ioctl_query_tether_stats_all *data);
+
 int ipa_qmi_get_data_stats(struct ipa_get_data_stats_req_msg_v01 *req,
 	struct ipa_get_data_stats_resp_msg_v01 *resp);
 
@@ -156,6 +190,10 @@ int ipa_qmi_set_data_quota(struct ipa_set_data_usage_quota_req_msg_v01 *req);
 int ipa_qmi_stop_data_qouta(void);
 
 void ipa_q6_handshake_complete(bool ssr_bootup);
+
+void ipa_qmi_init(void);
+
+void ipa_qmi_cleanup(void);
 
 #else /* CONFIG_RMNET_IPA */
 
@@ -261,6 +299,14 @@ static inline int ipa_qmi_stop_data_qouta(void)
 }
 
 static inline void ipa_q6_handshake_complete(bool ssr_bootup) { }
+
+static inline void ipa_qmi_init(void)
+{
+}
+
+static inline void ipa_qmi_cleanup(void)
+{
+}
 
 #endif /* CONFIG_RMNET_IPA */
 

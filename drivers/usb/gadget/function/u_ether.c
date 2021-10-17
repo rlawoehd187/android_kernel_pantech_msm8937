@@ -76,6 +76,11 @@ module_param(min_cpu_freq, uint, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(min_cpu_freq,
 	"to set minimum cpu frquency to when ethernet ifc is active");
 
+static unsigned int skb_timestamp_enable;
+module_param(skb_timestamp_enable, uint, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(skb_timestamp_enable,
+	"to enable timestamping for TX and RX packets");
+
 /* this refers to max number sgs per transfer
  * which includes headers/data packets
  */
@@ -187,7 +192,7 @@ MODULE_PARM_DESC(tx_qmult, "Additional queue length multiplier for tx");
 static inline int qlen(struct usb_gadget *gadget, unsigned qmult)
 {
 	if (gadget_is_dualspeed(gadget) && (gadget->speed == USB_SPEED_HIGH ||
-					    gadget->speed == USB_SPEED_SUPER))
+					    gadget->speed >= USB_SPEED_SUPER))
 		return qmult * DEFAULT_QLEN;
 	else
 		return DEFAULT_QLEN;
@@ -329,7 +334,6 @@ rx_submit(struct eth_dev *dev, struct usb_request *req, gfp_t gfp_flags)
 		spin_unlock_irqrestore(&dev->lock, flags);
 		return -ENOTCONN;
 	}
-
 
 	/* Padding up to RX_EXTRA handles minor disagreements with host.
 	 * Normally we use the USB "terminate on short read" convention;
@@ -554,16 +558,29 @@ static int alloc_requests(struct eth_dev *dev, struct gether *link, unsigned n)
 	int	status;
 
 	spin_lock(&dev->req_lock);
-	status = prealloc(&dev->tx_reqs, link->in_ep, n * tx_qmult,
+	/*
+	 * u_ether driver always assumes that it has both in and out endpoints
+	 * and calls alloc_requests on both the endpoints, without checking if
+	 * the endpoint exits or not. In case of DPL, there is only one in_ep
+	 * and hence while trying to allocate meomory for out_ep, there will be
+	 * a NULL pointer exception. So to avoid this, allocate memory only if
+	 * the endpoints exists
+	 */
+	if (link->in_ep) {
+		status = prealloc(&dev->tx_reqs, link->in_ep, n * tx_qmult,
 				dev->sg_enabled,
 				dev->header_len);
-	if (status < 0)
-		goto fail;
-	status = prealloc(&dev->rx_reqs, link->out_ep, n,
+		if (status < 0)
+			goto fail;
+	}
+
+	if (link->out_ep) {
+		status = prealloc(&dev->rx_reqs, link->out_ep, n,
 				dev->sg_enabled,
 				dev->header_len);
-	if (status < 0)
-		goto fail;
+		if (status < 0)
+			goto fail;
+	}
 	goto done;
 fail:
 	DBG(dev, "can't alloc requests\n");
@@ -669,6 +686,8 @@ static void process_rx_w(struct work_struct *work)
 		dev->net->stats.rx_packets++;
 		dev->net->stats.rx_bytes += skb->len;
 
+		if (skb_timestamp_enable)
+			skb->tstamp = ktime_get();
 		status = netif_rx_ni(skb);
 	}
 	set_wake_up_idle(false);
@@ -745,7 +764,8 @@ static void tx_complete(struct usb_ep *ep, struct usb_request *req)
 		dev->tx_aggr_cnt[n-1]++;
 
 		/* sg_ctx is only accessible here, can use lock-free version */
-		__skb_queue_purge(&sg_ctx->skbs);
+		while ((skb = __skb_dequeue(&sg_ctx->skbs)) != NULL)
+			dev_kfree_skb_any(skb);
 	}
 
 	dev->net->stats.tx_packets += n;
@@ -1056,13 +1076,14 @@ static netdev_tx_t eth_start_xmit(struct sk_buff *skb,
 	int			extra_alloc = 0;
 	int			retval;
 	struct usb_request	*req = NULL;
-	struct sk_buff		*new_skb;
+	struct sk_buff		*new_skb, *clone = NULL;
 	unsigned long		flags;
 	struct usb_ep		*in = NULL;
 	u16			cdc_filter = 0;
 	bool			multi_pkt_xfer = false;
-	u32			fixed_in_len;
-	bool			is_fixed;
+	u32			fixed_in_len = 0;
+	bool			is_fixed = false;
+	struct skb_shared_hwtstamps hwtstamps;
 
 	spin_lock_irqsave(&dev->lock, flags);
 	if (dev->port_usb) {
@@ -1276,6 +1297,16 @@ static netdev_tx_t eth_start_xmit(struct sk_buff *skb,
 		req->no_interrupt = 0;
 	}
 
+	if (skb_timestamp_enable) {
+		skb->tstamp = ktime_get();
+		clone = skb_clone_sk(skb);
+		if (clone) {
+			memset(&hwtstamps, 0,
+					sizeof(struct skb_shared_hwtstamps));
+			skb_complete_tx_timestamp(clone, &hwtstamps);
+		}
+	}
+
 	retval = usb_ep_queue(in, req, GFP_ATOMIC);
 	switch (retval) {
 	default:
@@ -1381,23 +1412,31 @@ static int eth_stop(struct net_device *net)
 		 * their own pace; the network stack can handle old packets.
 		 * For the moment we leave this here, since it works.
 		 */
-		in = link->in_ep->desc;
-		out = link->out_ep->desc;
-		usb_ep_disable(link->in_ep);
-		usb_ep_disable(link->out_ep);
-		if (netif_carrier_ok(net)) {
-			if (config_ep_by_speed(dev->gadget, &link->func,
-					       link->in_ep) ||
-			    config_ep_by_speed(dev->gadget, &link->func,
-					       link->out_ep)) {
+		if (link->in_ep) {
+			in = link->in_ep->desc;
+			usb_ep_disable(link->in_ep);
+			if (netif_carrier_ok(net) &&
+				(config_ep_by_speed(dev->gadget, &link->func,
+					link->in_ep))) {
 				link->in_ep->desc = NULL;
+				return -EINVAL;
+			}
+			DBG(dev, "host still using in endpoint\n");
+			link->in_ep->desc = in;
+			usb_ep_enable(link->in_ep);
+		}
+
+		if (link->out_ep) {
+			out = link->out_ep->desc;
+			usb_ep_disable(link->out_ep);
+			if ((netif_carrier_ok(net)) &&
+				(config_ep_by_speed(dev->gadget, &link->func,
+					link->out_ep))) {
 				link->out_ep->desc = NULL;
 				return -EINVAL;
 			}
-			DBG(dev, "host still using in/out endpoints\n");
-			link->in_ep->desc = in;
+			DBG(dev, "host still using out endpoint\n");
 			link->out_ep->desc = out;
-			usb_ep_enable(link->in_ep);
 			usb_ep_enable(link->out_ep);
 		}
 	}
@@ -2057,20 +2096,30 @@ struct net_device *gether_connect(struct gether *link)
 		}
 	}
 
-	link->in_ep->driver_data = dev;
-	result = usb_ep_enable(link->in_ep);
-	if (result != 0) {
-		DBG(dev, "enable %s --> %d\n",
-			link->in_ep->name, result);
+	if (!link->in_ep && !link->out_ep) {
+		WARN_ON(1);
+		result = -ENOTSUPP;
 		goto fail0;
 	}
 
-	link->out_ep->driver_data = dev;
-	result = usb_ep_enable(link->out_ep);
-	if (result != 0) {
-		DBG(dev, "enable %s --> %d\n",
-			link->out_ep->name, result);
-		goto fail1;
+	if (link->in_ep) {
+		link->in_ep->driver_data = dev;
+		result = usb_ep_enable(link->in_ep);
+		if (result != 0) {
+			DBG(dev, "enable %s --> %d\n",
+				link->in_ep->name, result);
+			goto fail0;
+		}
+	}
+
+	if (link->out_ep) {
+		link->out_ep->driver_data = dev;
+		result = usb_ep_enable(link->out_ep);
+		if (result != 0) {
+			DBG(dev, "enable %s --> %d\n",
+				link->out_ep->name, result);
+			goto fail1;
+		}
 	}
 
 	dev->header_len = link->header_len;
@@ -2114,9 +2163,11 @@ struct net_device *gether_connect(struct gether *link)
 
 	/* on error, disable any endpoints  */
 	} else {
-		(void) usb_ep_disable(link->out_ep);
+		if (link->out_ep)
+			(void) usb_ep_disable(link->out_ep);
 fail1:
-		(void) usb_ep_disable(link->in_ep);
+		if (link->in_ep)
+			(void) usb_ep_disable(link->in_ep);
 	}
 
 	/* caller is responsible for cleanup on error */
@@ -2164,59 +2215,63 @@ void gether_disconnect(struct gether *link)
 	 * of all pending i/o.  then free the request objects
 	 * and forget about the endpoints.
 	 */
-	usb_ep_disable(link->in_ep);
-	spin_lock(&dev->req_lock);
-	while (!list_empty(&dev->tx_reqs)) {
-		req = container_of(dev->tx_reqs.next,
-					struct usb_request, list);
-		list_del(&req->list);
-
-		spin_unlock(&dev->req_lock);
-		if (link->multi_pkt_xfer ||
-				dev->sg_enabled) {
-			kfree(req->buf);
-			req->buf = NULL;
-		}
-		if (dev->sg_enabled) {
-			kfree(req->context);
-			kfree(req->sg);
-		}
-
-		usb_ep_free_request(link->in_ep, req);
+	if (link->in_ep) {
+		usb_ep_disable(link->in_ep);
 		spin_lock(&dev->req_lock);
+		while (!list_empty(&dev->tx_reqs)) {
+			req = container_of(dev->tx_reqs.next,
+						struct usb_request, list);
+			list_del(&req->list);
+
+			spin_unlock(&dev->req_lock);
+			if (link->multi_pkt_xfer ||
+					dev->sg_enabled) {
+				kfree(req->buf);
+				req->buf = NULL;
+			}
+			if (dev->sg_enabled) {
+				kfree(req->context);
+				kfree(req->sg);
+			}
+
+			usb_ep_free_request(link->in_ep, req);
+			spin_lock(&dev->req_lock);
+		}
+
+		/* Free rndis header buffer memory */
+		if (!dev->sg_enabled)
+			kfree(link->header);
+		link->header = NULL;
+		spin_unlock(&dev->req_lock);
+
+		skb_queue_purge(&dev->tx_skb_q);
+
+		link->in_ep->driver_data = NULL;
+		link->in_ep->desc = NULL;
 	}
 
-	/* Free rndis header buffer memory */
-	if (!dev->sg_enabled)
-		kfree(link->header);
-	link->header = NULL;
-	spin_unlock(&dev->req_lock);
-
-	skb_queue_purge(&dev->tx_skb_q);
-
-	link->in_ep->driver_data = NULL;
-	link->in_ep->desc = NULL;
-
-	usb_ep_disable(link->out_ep);
-	spin_lock(&dev->req_lock);
-	while (!list_empty(&dev->rx_reqs)) {
-		req = container_of(dev->rx_reqs.next,
-					struct usb_request, list);
-		list_del(&req->list);
-
-		spin_unlock(&dev->req_lock);
-		usb_ep_free_request(link->out_ep, req);
+	if (link->out_ep) {
+		usb_ep_disable(link->out_ep);
 		spin_lock(&dev->req_lock);
+		while (!list_empty(&dev->rx_reqs)) {
+			req = container_of(dev->rx_reqs.next,
+						struct usb_request, list);
+			list_del(&req->list);
+
+			spin_unlock(&dev->req_lock);
+			usb_ep_free_request(link->out_ep, req);
+			spin_lock(&dev->req_lock);
+		}
+		spin_unlock(&dev->req_lock);
+
+		spin_lock(&dev->rx_frames.lock);
+		while ((skb = __skb_dequeue(&dev->rx_frames)))
+			dev_kfree_skb_any(skb);
+		spin_unlock(&dev->rx_frames.lock);
+
+		link->out_ep->driver_data = NULL;
+		link->out_ep->desc = NULL;
 	}
-	spin_unlock(&dev->req_lock);
-
-	spin_lock(&dev->rx_frames.lock);
-	while ((skb = __skb_dequeue(&dev->rx_frames)))
-		dev_kfree_skb_any(skb);
-	spin_unlock(&dev->rx_frames.lock);
-
-	link->out_ep->driver_data = NULL;
-	link->out_ep->desc = NULL;
 
 	pr_debug("%s(): tx_throttle count= %lu", __func__,
 					dev->tx_throttle);

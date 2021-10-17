@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2011-2018, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -149,7 +149,13 @@ EXPORT_SYMBOL(msm_ion_client_create);
 int msm_ion_do_cache_op(struct ion_client *client, struct ion_handle *handle,
 			void *vaddr, unsigned long len, unsigned int cmd)
 {
-	return ion_do_cache_op(client, handle, vaddr, 0, len, cmd);
+	int ret;
+
+	lock_client(client);
+	ret = ion_do_cache_op(client, handle, vaddr, 0, len, cmd);
+	unlock_client(client);
+
+	return ret;
 }
 EXPORT_SYMBOL(msm_ion_do_cache_op);
 
@@ -166,7 +172,7 @@ static int ion_no_pages_cache_ops(struct ion_client *client,
 	ion_phys_addr_t buff_phys_start = 0;
 	size_t buf_length = 0;
 
-	ret = ion_phys(client, handle, &buff_phys_start, &buf_length);
+	ret = ion_phys_nolock(client, handle, &buff_phys_start, &buf_length);
 	if (ret)
 		return -EINVAL;
 
@@ -280,9 +286,10 @@ static int ion_pages_cache_ops(struct ion_client *client,
 	int i;
 	unsigned int len = 0;
 	void (*op)(const void *, const void *);
+	struct ion_buffer *buffer;
 
-
-	table = ion_sg_table(client, handle);
+	buffer = get_buffer(handle);
+	table = buffer->sg_table;
 	if (IS_ERR_OR_NULL(table))
 		return PTR_ERR(table);
 
@@ -321,18 +328,26 @@ int ion_do_cache_op(struct ion_client *client, struct ion_handle *handle,
 	unsigned long flags;
 	struct sg_table *table;
 	struct page *page;
+	struct ion_buffer *buffer;
 
-	ret = ion_handle_get_flags(client, handle, &flags);
-	if (ret)
+	if (!ion_handle_validate(client, handle)) {
+		pr_err("%s: invalid handle passed to %s.\n",
+			__func__, __func__);
 		return -EINVAL;
+	}
+
+	buffer = get_buffer(handle);
+	mutex_lock(&buffer->lock);
+	flags = buffer->flags;
+	mutex_unlock(&buffer->lock);
 
 	if (!ION_IS_CACHED(flags))
 		return 0;
 
-	if (flags & ION_FLAG_SECURE)
+	if (get_secure_vmid(flags) > 0)
 		return 0;
 
-	table = ion_sg_table(client, handle);
+	table = buffer->sg_table;
 
 	if (IS_ERR_OR_NULL(table))
 		return PTR_ERR(table);
@@ -620,6 +635,18 @@ int ion_heap_allow_heap_secure(enum ion_heap_type type)
 	return false;
 }
 
+bool is_secure_vmid_valid(int vmid)
+{
+
+	return (vmid == VMID_CP_TOUCH ||
+		vmid == VMID_CP_BITSTREAM ||
+		vmid == VMID_CP_PIXEL ||
+		vmid == VMID_CP_NON_PIXEL ||
+		vmid == VMID_CP_CAMERA ||
+		vmid == VMID_CP_SEC_DISPLAY ||
+		vmid == VMID_CP_APP);
+}
+
 int get_secure_vmid(unsigned long flags)
 {
 	if (flags & ION_FLAG_CP_TOUCH)
@@ -682,31 +709,35 @@ long msm_ion_custom_ioctl(struct ion_client *client,
 		int ret;
 		struct mm_struct *mm = current->active_mm;
 
+		lock_client(client);
 		if (data.flush_data.handle > 0) {
-			handle = ion_handle_get_by_id(client,
+			handle = ion_handle_get_by_id_nolock(client,
 						(int)data.flush_data.handle);
 			if (IS_ERR(handle)) {
 				pr_info("%s: Could not find handle: %d\n",
 					__func__, (int)data.flush_data.handle);
+				unlock_client(client);
 				return PTR_ERR(handle);
 			}
 		} else {
-			handle = ion_import_dma_buf(client, data.flush_data.fd);
+			handle = ion_import_dma_buf_nolock(client,
+							   data.flush_data.fd);
 			if (IS_ERR(handle)) {
-				pr_info("%s: Could not import handle: %p\n",
+				pr_info("%s: Could not import handle: %pK\n",
 					__func__, handle);
+				unlock_client(client);
 				return -EINVAL;
 			}
 		}
 
 		down_read(&mm->mmap_sem);
 
-		start = (unsigned long) data.flush_data.vaddr;
-		end = (unsigned long) data.flush_data.vaddr
-			+ data.flush_data.length;
+		start = (unsigned long)data.flush_data.vaddr +
+			data.flush_data.offset;
+		end = start + data.flush_data.length;
 
 		if (start && check_vaddr_bounds(start, end)) {
-			pr_err("%s: virtual address %p is out of bounds\n",
+			pr_err("%s: virtual address %pK is out of bounds\n",
 				__func__, data.flush_data.vaddr);
 			ret = -EINVAL;
 		} else {
@@ -717,24 +748,43 @@ long msm_ion_custom_ioctl(struct ion_client *client,
 		}
 		up_read(&mm->mmap_sem);
 
-		ion_free(client, handle);
+		ion_free_nolock(client, handle);
 
+		unlock_client(client);
 		if (ret < 0)
 			return ret;
 		break;
 	}
 	case ION_IOC_PREFETCH:
 	{
-		ion_walk_heaps(client, data.prefetch_data.heap_id,
+		int ret;
+
+		ret = ion_walk_heaps(client, data.prefetch_data.heap_id,
+			ION_HEAP_TYPE_SECURE_DMA,
 			(void *)data.prefetch_data.len,
 			ion_secure_cma_prefetch);
+		if (ret)
+			return ret;
+
+		ret = ion_walk_heaps(client, data.prefetch_data.heap_id,
+			ION_HEAP_TYPE_SYSTEM_SECURE,
+			(void *)&data.prefetch_data,
+			ion_system_secure_heap_prefetch);
+		if (ret)
+			return ret;
 		break;
 	}
 	case ION_IOC_DRAIN:
 	{
-		ion_walk_heaps(client, data.prefetch_data.heap_id,
+		int ret;
+
+		ret = ion_walk_heaps(client, data.prefetch_data.heap_id,
+			ION_HEAP_TYPE_SECURE_DMA,
 			(void *)data.prefetch_data.len,
 			ion_secure_cma_drain_pool);
+
+		if (ret)
+			return ret;
 		break;
 	}
 

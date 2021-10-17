@@ -129,6 +129,8 @@ static int xhci_plat_probe(struct platform_device *pdev)
 	struct clk              *clk;
 	int			ret;
 	int			irq;
+	u32			temp, imod;
+	unsigned long		flags;
 
 	if (usb_disabled())
 		return -ENODEV;
@@ -137,7 +139,7 @@ static int xhci_plat_probe(struct platform_device *pdev)
 
 	irq = platform_get_irq(pdev, 0);
 	if (irq < 0)
-		return -ENODEV;
+		return irq;
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (!res)
@@ -175,6 +177,9 @@ static int xhci_plat_probe(struct platform_device *pdev)
 		ret = clk_prepare_enable(clk);
 		if (ret)
 			goto put_hcd;
+	} else if (PTR_ERR(clk) == -EPROBE_DEFER) {
+		ret = -EPROBE_DEFER;
+		goto put_hcd;
 	}
 
 	if (pdev->dev.parent)
@@ -231,6 +236,18 @@ static int xhci_plat_probe(struct platform_device *pdev)
 	if (ret)
 		goto put_usb3_hcd;
 
+	/* override imod interval if specified */
+	if (pdata && pdata->imod_interval) {
+		imod = pdata->imod_interval & ER_IRQ_INTERVAL_MASK;
+		spin_lock_irqsave(&xhci->lock, flags);
+		temp = readl_relaxed(&xhci->ir_set->irq_control);
+		temp &= ~ER_IRQ_INTERVAL_MASK;
+		temp |= imod;
+		writel_relaxed(temp, &xhci->ir_set->irq_control);
+		spin_unlock_irqrestore(&xhci->lock, flags);
+		dev_dbg(&pdev->dev, "%s: imod set to %u\n", __func__, imod);
+	}
+
 	ret = device_create_file(&pdev->dev, &dev_attr_config_imod);
 	if (ret)
 		dev_err(&pdev->dev, "%s: unable to create imod sysfs entry\n",
@@ -266,6 +283,7 @@ static int xhci_plat_remove(struct platform_device *dev)
 	pm_runtime_disable(&dev->dev);
 
 	device_remove_file(&dev->dev, &dev_attr_config_imod);
+	xhci->xhc_state |= XHCI_STATE_REMOVING;
 	usb_remove_hcd(xhci->shared_hcd);
 	usb_put_hcd(xhci->shared_hcd);
 
@@ -300,13 +318,19 @@ static int xhci_plat_runtime_suspend(struct device *dev)
 {
 	struct usb_hcd *hcd = dev_get_drvdata(dev);
 	struct xhci_hcd *xhci = hcd_to_xhci(hcd);
+	int ret;
 
 	if (!xhci)
 		return 0;
 
 	dev_dbg(dev, "xhci-plat runtime suspend\n");
 
-	return xhci_suspend(xhci, true);
+	disable_irq(hcd->irq);
+	ret = xhci_suspend(xhci, true);
+	if (ret)
+		enable_irq(hcd->irq);
+
+	return ret;
 }
 
 static int xhci_plat_runtime_resume(struct device *dev)
@@ -321,6 +345,7 @@ static int xhci_plat_runtime_resume(struct device *dev)
 	dev_dbg(dev, "xhci-plat runtime resume\n");
 
 	ret = xhci_resume(xhci, false);
+	enable_irq(hcd->irq);
 	pm_runtime_mark_last_busy(dev);
 
 	return ret;
@@ -353,6 +378,7 @@ MODULE_DEVICE_TABLE(of, usb_xhci_of_match);
 static struct platform_driver usb_xhci_driver = {
 	.probe	= xhci_plat_probe,
 	.remove	= xhci_plat_remove,
+	.shutdown = usb_hcd_platform_shutdown,
 	.driver	= {
 		.name = "xhci-hcd",
 		.pm = DEV_PM_OPS,

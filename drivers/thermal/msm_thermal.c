@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2017, 2019  The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -45,10 +45,12 @@
 #include <linux/notifier.h>
 #include <linux/reboot.h>
 #include <soc/qcom/msm-core.h>
+#include <soc/qcom/qseecomi.h>
 #include <linux/cpumask.h>
 #include <linux/suspend.h>
 #include <linux/uaccess.h>
 #include <linux/uio_driver.h>
+#include <linux/msm-bus.h>
 
 #define CREATE_TRACE_POINTS
 #define TRACE_MSM_THERMAL
@@ -61,6 +63,7 @@
 #define SENSOR_SCALING_FACTOR 1
 #define MSM_THERMAL_NAME "msm_thermal"
 #define MSM_TSENS_PRINT  "log_tsens_temperature"
+#define MSM_TSENS_SAMPLING  "tsens_hw_sampling"
 #define CPU_BUF_SIZE 64
 #define CPU_DEVICE "cpu%d"
 #define MAX_DEBUGFS_CONFIG_LEN   32
@@ -74,6 +77,21 @@
 #define DEVM_NAME_MAX 30
 #define HOTPLUG_RETRY_INTERVAL_MS 100
 #define UIO_VERSION "1.0"
+#define THERM_DDR_MASTER_ID  1
+#define THERM_DDR_SLAVE_ID   512
+#define THERM_DDR_IB_VOTE_REQ   366000000
+
+#define SCM_TSENS_GET_NUM_OF_SAMPLING_LEVELS \
+	TZ_SYSCALL_CREATE_SMC_ID(TZ_OWNER_STD, SCM_SVC_TSENS, 0x01)
+
+#define SCM_TSENS_GET_SAMPLING_LEVEL_VAL \
+	TZ_SYSCALL_CREATE_SMC_ID(TZ_OWNER_STD, SCM_SVC_TSENS, 0x02)
+
+#define SCM_TSENS_SET_SAMPLING_LEVEL \
+	TZ_SYSCALL_CREATE_SMC_ID(TZ_OWNER_STD, SCM_SVC_TSENS, 0x03)
+
+#define SCM_TSENS_GET_CURRENT_SAMPLING_VAL \
+	TZ_SYSCALL_CREATE_SMC_ID(TZ_OWNER_STD, SCM_SVC_TSENS, 0x04)
 
 #define VALIDATE_AND_SET_MASK(_node, _key, _mask, _cpu) \
 	do { \
@@ -159,13 +177,13 @@ static bool ocr_nodes_called;
 static bool ocr_probed;
 static bool ocr_reg_init_defer;
 static bool hotplug_enabled;
-static bool interrupt_mode_enable;
 static bool msm_thermal_probed;
 static bool gfx_crit_phase_ctrl_enabled;
 static bool gfx_warm_phase_ctrl_enabled;
 static bool cx_phase_ctrl_enabled;
 static bool vdd_mx_enabled;
 static bool therm_reset_enabled;
+static bool therm_ddr_lm_enabled;
 static bool online_core;
 static bool cluster_info_probed;
 static bool cluster_info_nodes_called;
@@ -204,6 +222,12 @@ enum thermal_threshold {
 	FREQ_THRESHOLD_HIGH,
 	FREQ_THRESHOLD_LOW,
 	THRESHOLD_MAX_NR,
+};
+
+enum therm_ddr_events {
+	THERM_DDR_LOW_THRESH = 0,
+	THERM_DDR_HIGH_THRESH,
+	THERM_DDR_MAX_THRESH
 };
 
 struct cluster_info {
@@ -288,6 +312,8 @@ enum msm_thresh_list {
 	MSM_GFX_PHASE_CTRL_HOT,
 	MSM_OCR,
 	MSM_VDD_MX_RESTRICTION,
+	MSM_THERM_DDR_LM,
+	MSM_THERM_HW_SAMPLING,
 	MSM_LIST_MAX_NR,
 };
 
@@ -334,8 +360,17 @@ struct msm_thermal_debugfs_thresh_config {
 struct msm_thermal_debugfs_entry {
 	struct dentry *parent;
 	struct dentry *tsens_print;
+	struct dentry *tsens_sampling;
 	struct dentry *config;
 	struct dentry *config_data;
+};
+
+struct msm_thermal_tsens_sampling_info {
+	bool enabled;
+	uint32_t max_lvl;
+	uint32_t req_lvl;
+	uint32_t cur_lvl;
+	uint32_t def_lvl;
 };
 
 static struct psm_rail *psm_rails;
@@ -349,6 +384,9 @@ static struct cluster_info *core_ptr;
 static struct msm_thermal_debugfs_entry *msm_therm_debugfs;
 static struct devmgr_devices *devices;
 static struct msm_thermal_debugfs_thresh_config *mit_config;
+static struct msm_bus_scale_pdata *therm_ddr_lm_data;
+static uint8_t therm_ddr_lm_handle;
+static struct msm_thermal_tsens_sampling_info *tsens_sampling;
 
 struct vdd_rstr_enable {
 	struct kobj_attribute ko_attr;
@@ -1095,6 +1133,70 @@ static ssize_t cluster_info_show(
 	return tot_size;
 }
 
+static int therm_tsens_sampling_scm_cmd(struct scm_desc *desc_arg,
+		uint32_t cmd_id, uint32_t *cmd_arg, uint32_t *tz_ret)
+{
+	int ret = 0;
+
+	if (!is_scm_armv8()) {
+		ret = scm_call(SCM_SVC_TSENS, cmd_id, (void *)cmd_arg,
+			cmd_arg ? SCM_BUFFER_SIZE(*cmd_arg) : 0,
+			tz_ret, tz_ret ? SCM_BUFFER_SIZE(*tz_ret) : 0);
+	} else {
+		ret = scm_call2(cmd_id, desc_arg);
+		if (tz_ret)
+			*tz_ret = desc_arg->ret[0];
+	}
+	/* Have barrier before reading from TZ data */
+	mb();
+
+	if (ret)
+		pr_err("Error in SCM v%d get type. cmd:%x err:%d\n",
+			(is_scm_armv8()) ? 8 : 7, cmd_id, ret);
+
+	return ret;
+};
+
+static int thermal_tsens_sampling_debugfs_read(struct seq_file *m, void *data)
+{
+	uint32_t ret_sampling = 0;
+	int ret = 0;
+	struct scm_desc desc_arg;
+
+	if (!tsens_sampling || !tsens_sampling->enabled) {
+		seq_puts(m, "TSENS dynamic sampling is not initialized\n");
+		return 0;
+	}
+
+	desc_arg.arginfo = SCM_ARGS(0);
+	ret = therm_tsens_sampling_scm_cmd(&desc_arg,
+		SCM_TSENS_GET_CURRENT_SAMPLING_VAL, NULL, &ret_sampling);
+	if (ret) {
+		seq_puts(m, "Error in reading current sampling\n");
+	} else {
+		pr_debug("SCM call is success for sampling[%d]:%d\n",
+			tsens_sampling->cur_lvl, ret_sampling);
+		seq_printf(m, "tsens hw sampling:cur level:%d value:%u ms\n",
+				tsens_sampling->cur_lvl, ret_sampling);
+	}
+
+	return 0;
+}
+
+static int thermal_tsens_sampling_debugfs_open(struct inode *inode,
+					struct file *file)
+{
+	return single_open(file, thermal_tsens_sampling_debugfs_read,
+				inode->i_private);
+}
+
+static const struct file_operations thermal_debugfs_tsens_sampling_ops = {
+	.open = thermal_tsens_sampling_debugfs_open,
+	.read = seq_read,
+	.llseek = seq_lseek,
+	.release = single_release,
+};
+
 static int thermal_config_debugfs_open(struct inode *inode,
 					struct file *file)
 {
@@ -1185,6 +1287,15 @@ static int create_thermal_debugfs(void)
 		ret = PTR_ERR(msm_therm_debugfs->tsens_print);
 		pr_err("Error creating debugfs:[%s]. err:%d\n",
 			MSM_TSENS_PRINT, ret);
+		goto create_exit;
+	}
+
+	msm_therm_debugfs->tsens_sampling = debugfs_create_file(
+			MSM_TSENS_SAMPLING, 0400, msm_therm_debugfs->parent,
+			NULL, &thermal_debugfs_tsens_sampling_ops);
+	if (!msm_therm_debugfs->tsens_sampling) {
+		pr_err("Error creating debugfs:[%s]\n",
+			MSM_TSENS_SAMPLING);
 		goto create_exit;
 	}
 
@@ -1806,14 +1917,14 @@ static int vdd_restriction_apply_voltage(struct rail *r, int level)
 	/* level = -1: disable, level = 0,1,2..n: enable */
 	if (level == -1) {
 		ret = regulator_set_voltage(r->reg, r->min_level,
-			r->levels[r->num_levels - 1]);
+			INT_MAX);
 		if (!ret)
 			r->curr_level = -1;
 		pr_debug("Requested min level for %s. curr level: %d\n",
 				r->name, r->curr_level);
 	} else if (level >= 0 && level < (r->num_levels)) {
 		ret = regulator_set_voltage(r->reg, r->levels[level],
-			r->levels[r->num_levels - 1]);
+			INT_MAX);
 		if (!ret)
 			r->curr_level = level;
 		pr_debug("Requesting level %d for %s. curr level: %d\n",
@@ -2361,7 +2472,6 @@ fail:
 
 static int create_sensor_id_map(struct device *dev)
 {
-	int i = 0;
 	int ret = 0;
 
 	tsens_id_map = devm_kzalloc(dev,
@@ -2372,19 +2482,10 @@ static int create_sensor_id_map(struct device *dev)
 		return -ENOMEM;
 	}
 
-	for (i = 0; i < max_tsens_num; i++) {
-		ret = tsens_get_hw_id_mapping(i, &tsens_id_map[i]);
-		/* If return -ENXIO, hw_id is default in sequence */
-		if (ret) {
-			if (ret == -ENXIO) {
-				tsens_id_map[i] = i;
-				ret = 0;
-			} else {
-				pr_err("Failed to get hw id for id:%d.err:%d\n",
-						i, ret);
-				goto fail;
-			}
-		}
+	ret = tsens_get_hw_id_mapping(max_tsens_num, tsens_id_map);
+	if (ret) {
+		pr_err("Failed to get tsens id's:%d\n", ret);
+		goto fail;
 	}
 
 	return ret;
@@ -2695,8 +2796,12 @@ static void vdd_mx_notify(struct therm_threshold *trig_thresh)
 			pr_err("Failed to remove vdd mx restriction\n");
 	}
 	mutex_unlock(&vdd_mx_mutex);
-	sensor_mgr_set_threshold(trig_thresh->sensor_id,
+
+	if (trig_thresh->cur_state != trig_thresh->trip_triggered) {
+		sensor_mgr_set_threshold(trig_thresh->sensor_id,
 					trig_thresh->threshold);
+		trig_thresh->cur_state = trig_thresh->trip_triggered;
+	}
 }
 
 static void msm_thermal_bite(int zone_id, long temp)
@@ -2783,6 +2888,189 @@ static void therm_reset_notify(struct therm_threshold *thresh_data)
 					thresh_data->threshold);
 }
 
+static int therm_ddr_lm_apply_limit(bool enable)
+{
+	static bool ddr_lm_applied;
+	int ret = 0;
+
+	if (ddr_lm_applied == enable)
+		return 0;
+
+	ret = msm_bus_scale_client_update_request(therm_ddr_lm_handle, enable);
+	if (ret) {
+		pr_err("Failed to %s ddr lm limit. ret:%d\n",
+			enable ? "Apply" : "Clear", ret);
+		return ret;
+	}
+	ddr_lm_applied = enable;
+	pr_debug("Thermal DDR restriction is %s\n", enable ?
+		"Applied" : "Cleared");
+
+	return 0;
+}
+
+static inline void cleanup_bus_data(struct msm_bus_scale_pdata *data,
+			struct platform_device *pdev)
+{
+	int i = 0;
+
+	if (therm_ddr_lm_handle) {
+		therm_ddr_lm_apply_limit(false);
+		msm_bus_scale_unregister_client(therm_ddr_lm_handle);
+	}
+	if (data) {
+		if (data->usecase) {
+			for (; i < THERM_DDR_MAX_THRESH; i++)
+				if (data->usecase[i].vectors)
+					devm_kfree(&pdev->dev,
+						data->usecase[i].vectors);
+
+			devm_kfree(&pdev->dev, data->usecase);
+		}
+		devm_kfree(&pdev->dev, data);
+	}
+}
+
+static void therm_ddr_lm_notify(struct therm_threshold *trig_thresh)
+{
+	if (!therm_ddr_lm_enabled)
+		return;
+
+	if (!trig_thresh) {
+		pr_err("Invalid input\n");
+		return;
+	}
+
+	switch (trig_thresh->trip_triggered) {
+	case THERMAL_TRIP_CONFIGURABLE_HI:
+		therm_ddr_lm_apply_limit(true);
+		break;
+	case THERMAL_TRIP_CONFIGURABLE_LOW:
+		therm_ddr_lm_apply_limit(false);
+		break;
+	default:
+		pr_err("Invalid trip type\n");
+		return;
+	}
+
+	if (trig_thresh->cur_state != trig_thresh->trip_triggered) {
+		sensor_mgr_set_threshold(trig_thresh->sensor_id,
+			trig_thresh->threshold);
+		trig_thresh->cur_state = trig_thresh->trip_triggered;
+	}
+}
+
+static int msm_thermal_handle_dynamic_sampling(bool triggered)
+{
+	uint32_t level;
+	int ret = 0;
+	struct scm_desc desc_arg;
+
+	level = triggered ? tsens_sampling->req_lvl : tsens_sampling->def_lvl;
+
+	if (level >= tsens_sampling->max_lvl)
+		level = tsens_sampling->max_lvl - 1;
+
+	if (tsens_sampling->cur_lvl == level)
+		return 0;
+
+	desc_arg.args[0] = level;
+	desc_arg.arginfo = SCM_ARGS(1, SCM_VAL);
+
+	ret = therm_tsens_sampling_scm_cmd(&desc_arg,
+		SCM_TSENS_SET_SAMPLING_LEVEL, &level, NULL);
+	if (ret)
+		return ret;
+
+	tsens_sampling->cur_lvl = level;
+	pr_debug("Thermal TSENS sampling is updated with level:%d\n", level);
+
+	return ret;
+}
+
+static void therm_dynamic_sampling_notify(struct therm_threshold *trig_thresh)
+{
+	static uint32_t sampling_sens_status;
+	int ret;
+
+	pr_debug("Sensor%d trigger recevied for type %d\n",
+		trig_thresh->sensor_id,
+		trig_thresh->trip_triggered);
+
+	if (!tsens_sampling || !tsens_sampling->enabled)
+		return;
+
+	switch (trig_thresh->trip_triggered) {
+	case THERMAL_TRIP_CONFIGURABLE_HI:
+		sampling_sens_status |= BIT(trig_thresh->sensor_id);
+		break;
+	case THERMAL_TRIP_CONFIGURABLE_LOW:
+		if (sampling_sens_status & BIT(trig_thresh->sensor_id))
+			sampling_sens_status ^= BIT(trig_thresh->sensor_id);
+		break;
+	default:
+		pr_err("Unsupported trip type\n");
+		break;
+	}
+
+	ret = msm_thermal_handle_dynamic_sampling(
+			sampling_sens_status ? true : false);
+	if (ret)
+		pr_err("Failed to apply mx restriction\n");
+
+	if (trig_thresh->cur_state != trig_thresh->trip_triggered) {
+		sensor_mgr_set_threshold(trig_thresh->sensor_id,
+					trig_thresh->threshold);
+		trig_thresh->cur_state = trig_thresh->trip_triggered;
+	}
+}
+
+static int do_therm_dynamic_sampling(void)
+{
+	long temp = 0;
+	int ret = 0;
+	int i = 0;
+	int dis_cnt = 0;
+
+	if (!tsens_sampling || !tsens_sampling->enabled)
+		return ret;
+
+	for (i = 0; i < thresh[MSM_THERM_HW_SAMPLING].thresh_ct; i++) {
+		ret = therm_get_temp(
+			thresh[MSM_THERM_HW_SAMPLING].thresh_list[i].sensor_id,
+			thresh[MSM_THERM_HW_SAMPLING].thresh_list[i].id_type,
+			&temp);
+		if (ret) {
+			pr_err("Unable to read TSENS sensor:%d, err:%d\n",
+				thresh[MSM_THERM_HW_SAMPLING].thresh_list[i].
+					sensor_id, ret);
+			dis_cnt++;
+			continue;
+		}
+		if (temp >= thresh[MSM_THERM_HW_SAMPLING].thresh_list[
+							i].threshold[0].temp) {
+			ret = msm_thermal_handle_dynamic_sampling(true);
+			if (ret)
+				pr_err(
+				"Failed to apply mx restriction\n");
+			goto exit;
+		} else if (temp <=
+			thresh[MSM_THERM_HW_SAMPLING].thresh_list[
+							i].threshold[1].temp) {
+			dis_cnt++;
+		}
+	}
+
+	if (dis_cnt == thresh[MSM_THERM_HW_SAMPLING].thresh_ct) {
+		ret = msm_thermal_handle_dynamic_sampling(false);
+		if (ret)
+			pr_err("Failed to clear dynamic sampling\n");
+	}
+
+exit:
+	return ret;
+}
+
 static void retry_hotplug(struct work_struct *work)
 {
 	mutex_lock(&core_control_mutex);
@@ -2819,7 +3107,7 @@ static void __ref do_core_control(long temp)
 				cpu_dev = get_cpu_device(i);
 				trace_thermal_pre_core_offline(i);
 				ret = device_offline(cpu_dev);
-				if (ret)
+				if (ret < 0)
 					pr_err("Error %d offline core %d\n",
 					       ret, i);
 				trace_thermal_post_core_offline(i,
@@ -2892,7 +3180,8 @@ static int __ref update_offline_cores(int val)
 			cpu_dev = get_cpu_device(cpu);
 			trace_thermal_pre_core_offline(cpu);
 			ret = device_offline(cpu_dev);
-			if (ret) {
+			if (ret < 0) {
+				cpus_offlined &= ~BIT(cpu);
 				pr_err_ratelimited(
 					"Unable to offline CPU%d. err:%d\n",
 					cpu, ret);
@@ -2962,6 +3251,14 @@ static __ref int do_hotplug(void *data)
 			&hotplug_notify_complete) != 0)
 			;
 		reinit_completion(&hotplug_notify_complete);
+
+		/*
+		 * Suspend framework will have disabled the
+		 * hotplug functionality. So wait till the suspend exits
+		 * and then re-evaluate.
+		 */
+		if (in_suspend)
+			continue;
 		mask = 0;
 
 		mutex_lock(&core_control_mutex);
@@ -3404,6 +3701,7 @@ static void check_temp(struct work_struct *work)
 	}
 	do_core_control(temp);
 	do_vdd_mx();
+	do_therm_dynamic_sampling();
 	do_psm();
 	do_gfx_phase_cond();
 	do_cx_phase_cond();
@@ -3512,7 +3810,7 @@ static int hotplug_init_cpu_offlined(void)
 	long temp = 0;
 	uint32_t cpu = 0;
 
-	if (!hotplug_enabled)
+	if (!hotplug_enabled || !hotplug_task)
 		return 0;
 
 	mutex_lock(&core_control_mutex);
@@ -3529,8 +3827,7 @@ static int hotplug_init_cpu_offlined(void)
 
 		if (temp >= msm_thermal_info.hotplug_temp_degC)
 			cpus[cpu].offline = 1;
-		else if (temp <= (msm_thermal_info.hotplug_temp_degC -
-			msm_thermal_info.hotplug_temp_hysteresis_degC))
+		else
 			cpus[cpu].offline = 0;
 	}
 	mutex_unlock(&core_control_mutex);
@@ -3767,6 +4064,8 @@ init_freq_thread:
 		pr_err("Failed to create frequency mitigation thread. err:%ld\n",
 				PTR_ERR(freq_mitigation_task));
 		return;
+	} else {
+		complete(&freq_mitigation_complete);
 	}
 }
 
@@ -4065,8 +4364,11 @@ static void cx_phase_ctrl_notify(struct therm_threshold *trig_thresh)
 cx_phase_unlock_exit:
 	mutex_unlock(&cx_mutex);
 cx_phase_ctrl_exit:
-	sensor_mgr_set_threshold(trig_thresh->sensor_id,
+	if (trig_thresh->cur_state != trig_thresh->trip_triggered) {
+		sensor_mgr_set_threshold(trig_thresh->sensor_id,
 					trig_thresh->threshold);
+		trig_thresh->cur_state = trig_thresh->trip_triggered;
+	}
 	return;
 }
 
@@ -4194,8 +4496,11 @@ static void vdd_restriction_notify(struct therm_threshold *trig_thresh)
 unlock_and_exit:
 	mutex_unlock(&vdd_rstr_mutex);
 set_and_exit:
-	sensor_mgr_set_threshold(trig_thresh->sensor_id,
+	if (trig_thresh->cur_state != trig_thresh->trip_triggered) {
+		sensor_mgr_set_threshold(trig_thresh->sensor_id,
 					trig_thresh->threshold);
+		trig_thresh->cur_state = trig_thresh->trip_triggered;
+	}
 	return;
 }
 
@@ -4243,8 +4548,11 @@ static void ocr_notify(struct therm_threshold *trig_thresh)
 unlock_and_exit:
 	mutex_unlock(&ocr_mutex);
 set_and_exit:
-	sensor_mgr_set_threshold(trig_thresh->sensor_id,
-					trig_thresh->threshold);
+	if (trig_thresh->cur_state != trig_thresh->trip_triggered) {
+		sensor_mgr_set_threshold(trig_thresh->sensor_id,
+				trig_thresh->threshold);
+		trig_thresh->cur_state = trig_thresh->trip_triggered;
+	}
 	return;
 }
 
@@ -4379,6 +4687,8 @@ therm_set_exit:
 
 static void thermal_monitor_init(void)
 {
+	int ret = 0;
+
 	if (thermal_monitor_task)
 		return;
 
@@ -4402,7 +4712,8 @@ static void thermal_monitor_init(void)
 	if (vdd_rstr_enabled) {
 		if (vdd_rstr_apss_freq_dev_init())
 			pr_err("vdd APSS mitigation device init failed\n");
-		else if (!(convert_to_zone_id(&thresh[MSM_VDD_RESTRICTION])))
+
+		if (!(convert_to_zone_id(&thresh[MSM_VDD_RESTRICTION])))
 			therm_set_threshold(&thresh[MSM_VDD_RESTRICTION]);
 	}
 
@@ -4423,6 +4734,26 @@ static void thermal_monitor_init(void)
 	if (vdd_mx_enabled &&
 		!(convert_to_zone_id(&thresh[MSM_VDD_MX_RESTRICTION])))
 		therm_set_threshold(&thresh[MSM_VDD_MX_RESTRICTION]);
+
+	if (therm_ddr_lm_enabled &&
+		!(convert_to_zone_id(&thresh[MSM_THERM_DDR_LM]))) {
+		thresh[MSM_THERM_DDR_LM].thresh_list->trip_triggered = -1;
+		ret = sensor_mgr_set_threshold(
+			thresh[MSM_THERM_DDR_LM].thresh_list->sensor_id,
+			thresh[MSM_THERM_DDR_LM].thresh_list->threshold);
+		if (!IS_HI_THRESHOLD_SET(ret))
+			therm_ddr_lm_apply_limit(true);
+	}
+
+	if (tsens_sampling && tsens_sampling->enabled &&
+		!(convert_to_zone_id(&thresh[MSM_THERM_HW_SAMPLING]))) {
+		thresh[MSM_THERM_HW_SAMPLING].thresh_list->trip_triggered = -1;
+		ret = sensor_mgr_set_threshold(
+			thresh[MSM_THERM_HW_SAMPLING].thresh_list->sensor_id,
+			thresh[MSM_THERM_HW_SAMPLING].thresh_list->threshold);
+		if (!IS_HI_THRESHOLD_SET(ret))
+			msm_thermal_handle_dynamic_sampling(true);
+	}
 
 init_exit:
 	return;
@@ -4479,6 +4810,7 @@ int sensor_mgr_init_threshold(struct threshold_info *thresh_inp,
 			thresh_ptr[i].notify = callback;
 			thresh_ptr[i].trip_triggered = -1;
 			thresh_ptr[i].parent = thresh_inp;
+			thresh_ptr[i].cur_state = -1;
 			thresh_ptr[i].threshold[0].temp =
 				high_temp * tsens_scaling_factor;
 			thresh_ptr[i].threshold[0].trip =
@@ -4499,6 +4831,7 @@ int sensor_mgr_init_threshold(struct threshold_info *thresh_inp,
 		thresh_ptr->notify = callback;
 		thresh_ptr->trip_triggered = -1;
 		thresh_ptr->parent = thresh_inp;
+		thresh_ptr->cur_state = -1;
 		thresh_ptr->threshold[0].temp = high_temp * tsens_scaling_factor;
 		thresh_ptr->threshold[0].trip =
 			THERMAL_TRIP_CONFIGURABLE_HI;
@@ -4675,10 +5008,9 @@ static void __ref disable_msm_thermal(void)
 
 static void interrupt_mode_init(void)
 {
-	if (!msm_thermal_probed) {
-		interrupt_mode_enable = true;
+	if (!msm_thermal_probed)
 		return;
-	}
+
 	if (polling_enabled) {
 		polling_enabled = 0;
 		create_sensor_zone_id_map();
@@ -4754,7 +5086,7 @@ static ssize_t __ref store_cc_enabled(struct kobject *kobj,
 		hotplug_init_cpu_offlined();
 		mutex_lock(&core_control_mutex);
 		update_offline_cores(cpus_offlined);
-		if (hotplug_enabled) {
+		if (hotplug_enabled && hotplug_task) {
 			for_each_possible_cpu(cpu) {
 				if (!(msm_thermal_info.core_control_mask &
 					BIT(cpus[cpu].cpu)))
@@ -5693,6 +6025,16 @@ static void thermal_vdd_mit_disable(void)
 		pr_err("Disable vdd rstr for all failed. err:%d\n", ret);
 }
 
+static void thermal_dynamic_sampling_disable(void)
+{
+	int ret = 0;
+
+	THERM_MITIGATION_DISABLE(tsens_sampling->enabled,
+			MSM_THERM_HW_SAMPLING);
+	ret = msm_thermal_handle_dynamic_sampling(false);
+	if (ret)
+		pr_err("Disable dynamic sampling update error. err:%d\n", ret);
+}
 static void thermal_psm_mit_disable(void)
 {
 	int ret = 0;
@@ -5778,6 +6120,13 @@ static int probe_vdd_mx(struct device_node *node,
 	if (ret)
 		goto read_node_done;
 
+	/*
+	 * Monitor only this sensor if defined, otherwise monitor all tsens
+	 */
+	key = "qcom,mx-restriction-sensor_id";
+	if (of_property_read_u32(node, key, &data->vdd_mx_sensor_id))
+		data->vdd_mx_sensor_id = MONITOR_ALL_TSENS;
+
 	vdd_mx = devm_regulator_get(&pdev->dev, "vdd-mx");
 	if (IS_ERR_OR_NULL(vdd_mx)) {
 		ret = PTR_ERR(vdd_mx);
@@ -5804,7 +6153,7 @@ static int probe_vdd_mx(struct device_node *node,
 	}
 
 	ret = sensor_mgr_init_threshold(&thresh[MSM_VDD_MX_RESTRICTION],
-			MONITOR_ALL_TSENS,
+			data->vdd_mx_sensor_id,
 			data->vdd_mx_temp_degC + data->vdd_mx_temp_hyst_degC,
 			data->vdd_mx_temp_degC, vdd_mx_notify);
 
@@ -6084,6 +6433,128 @@ static int fetch_cpu_mitigaiton_info(struct msm_thermal_data *data,
 
 fetch_mitig_exit:
 	return err;
+}
+
+static int msm_bus_data_init(struct platform_device *pdev)
+{
+	struct msm_bus_scale_pdata *ddr_bus_data = NULL;
+	int ret = 0, i = 0;
+
+	ddr_bus_data = devm_kzalloc(&pdev->dev, sizeof(*ddr_bus_data),
+			GFP_KERNEL);
+	if (!ddr_bus_data) {
+		ret = -ENOMEM;
+		goto bus_exit;
+	}
+	ddr_bus_data->num_usecases = THERM_DDR_MAX_THRESH;
+	ddr_bus_data->name = KBUILD_MODNAME;
+	ddr_bus_data->usecase = devm_kcalloc(&pdev->dev, THERM_DDR_MAX_THRESH,
+					sizeof(*(ddr_bus_data->usecase)),
+					GFP_KERNEL);
+	if (!ddr_bus_data->usecase) {
+		ret =  -ENOMEM;
+		goto bus_exit;
+	}
+	for (i = 0; i < THERM_DDR_MAX_THRESH; i++) {
+		ddr_bus_data->usecase[i].num_paths = 1;
+		ddr_bus_data->usecase[i].vectors = devm_kzalloc(&pdev->dev,
+				sizeof(*(ddr_bus_data->usecase[i].vectors)),
+				GFP_KERNEL);
+		if (!ddr_bus_data->usecase[i].vectors) {
+			ret =  -ENOMEM;
+			goto bus_exit;
+		}
+		/* set common entry values */
+		ddr_bus_data->usecase[i].vectors->src = THERM_DDR_MASTER_ID;
+		ddr_bus_data->usecase[i].vectors->dst = THERM_DDR_SLAVE_ID;
+		ddr_bus_data->usecase[i].vectors->ab = 0;
+	}
+
+	ddr_bus_data->usecase[THERM_DDR_LOW_THRESH].vectors->ib = 0;
+	ddr_bus_data->usecase[THERM_DDR_HIGH_THRESH].vectors->ib =
+							THERM_DDR_IB_VOTE_REQ;
+	therm_ddr_lm_handle = msm_bus_scale_register_client(ddr_bus_data);
+	if (!therm_ddr_lm_handle) {
+		pr_err("Failed to register with bus driver\n");
+		ret = -EINVAL;
+		goto bus_exit;
+	}
+
+	therm_ddr_lm_data = ddr_bus_data;
+bus_exit:
+	if (ret)
+		cleanup_bus_data(ddr_bus_data, pdev);
+
+	return ret;
+}
+
+static void thermal_ddr_lm_disable(void)
+{
+	int ret = 0;
+
+	THERM_MITIGATION_DISABLE(therm_ddr_lm_enabled,
+		MSM_THERM_DDR_LM);
+	ret = therm_ddr_lm_apply_limit(false);
+	if (ret)
+		pr_err("Disable ddr lm failed. err:%d\n", ret);
+}
+
+static int probe_therm_ddr_lm(struct platform_device *pdev)
+{
+	char *key = NULL;
+	int ret = 0, arr_size = 0;
+	struct device_node *node = pdev->dev.of_node;
+	enum ddr_therm_cfg {
+		THERM_DDR_SENS_ID = 0,
+		THERM_DDR_HIGH_TEMP,
+		THERM_DDR_LOW_TEMP,
+		THERM_DDR_MAX_ENTRY
+	};
+	uint32_t therm_ddr_data[THERM_DDR_MAX_ENTRY] = {0};
+
+	key = "qcom,therm-ddr-lm-info";
+	if (!of_get_property(node, key, &arr_size) ||
+		arr_size <= 0)
+		return 0;
+
+	arr_size = arr_size / sizeof(__be32);
+	if (arr_size != THERM_DDR_MAX_ENTRY)
+		goto PROBE_DDR_LM_EXIT;
+
+	ret = of_property_read_u32_array(node, key,
+		therm_ddr_data, THERM_DDR_MAX_ENTRY);
+	if (ret)
+		goto PROBE_DDR_LM_EXIT;
+
+	/* Initialize bus APIs */
+	ret = msm_bus_data_init(pdev);
+	if (ret)
+		goto PROBE_DDR_LM_EXIT;
+
+	ret = sensor_mgr_init_threshold(&thresh[MSM_THERM_DDR_LM],
+		therm_ddr_data[THERM_DDR_SENS_ID],
+		therm_ddr_data[THERM_DDR_HIGH_TEMP],
+		therm_ddr_data[THERM_DDR_LOW_TEMP],
+		therm_ddr_lm_notify);
+	if (ret) {
+		pr_err("ddr lm sensor init failed\n");
+		goto PROBE_DDR_LM_EXIT;
+	}
+
+	therm_ddr_lm_enabled = true;
+	snprintf(mit_config[MSM_THERM_DDR_LM].config_name,
+		MAX_DEBUGFS_CONFIG_LEN, "ddr_lm");
+	mit_config[MSM_THERM_DDR_LM].disable_config = thermal_ddr_lm_disable;
+
+PROBE_DDR_LM_EXIT:
+	if (ret) {
+		dev_info(&pdev->dev,
+		"%s:Failed reading node=%s, key=%s err=%d. KTM continues\n",
+			__func__, node->full_name, key, ret);
+		therm_ddr_lm_enabled = false;
+	}
+
+	return ret;
 }
 
 static void probe_sensor_info(struct device_node *node,
@@ -6598,6 +7069,113 @@ probe_cx_exit:
 	return ret;
 }
 
+static int therm_tsens_dynamic_sampling_init(uint32_t req_lvl, uint32_t def_lvl)
+{
+	int ret = 0, max_lvl = 0;
+	struct scm_desc desc_arg;
+
+	desc_arg.arginfo = SCM_ARGS(0);
+	ret = therm_tsens_sampling_scm_cmd(&desc_arg,
+		SCM_TSENS_GET_NUM_OF_SAMPLING_LEVELS, NULL, &max_lvl);
+	if (ret)
+		return ret;
+
+	pr_debug("TSENS_GET_NUM_OF_SAMPLING_LEVELS is success with value=%d\n",
+			max_lvl);
+
+	if (req_lvl >= max_lvl || def_lvl >= max_lvl) {
+		pr_err(
+		"Invalid Tsens sampling req lvl:%d or def lvl:%d, max lvl:%d\n",
+			req_lvl, def_lvl, max_lvl);
+		return -EINVAL;
+	}
+
+	return max_lvl;
+}
+
+static int probe_therm_dynamic_hw_sampling(struct device_node *node,
+		struct msm_thermal_data *data,
+		struct platform_device *pdev)
+{
+	char *key = NULL;
+	int ret = 0, arr_size = 0;
+	enum sampling_therm_cfg {
+		THERM_SAMP_SENS_ID = 0,
+		THERM_SAMP_HIGH_TEMP,
+		THERM_SAMP_LOW_TEMP,
+		THERM_SAMP_REQ_LVL,
+		THERM_SAMP_DEF_LVL,
+		THERM_SAMP_MAX_ENTRY
+	};
+	uint32_t therm_sampling_data[THERM_SAMP_MAX_ENTRY] = {0};
+
+	key = "qcom,therm-dynamic-hw-sampling-info";
+	if (!of_get_property(node, key, &arr_size) ||
+		arr_size <= 0)
+		return 0;
+
+	arr_size = arr_size / sizeof(__be32);
+	if (arr_size != THERM_SAMP_MAX_ENTRY) {
+		ret = -EINVAL;
+		pr_err("Therm dynamic sampling invalid number of entries\n");
+		goto PROBE_DYN_EXIT;
+	}
+
+	ret = of_property_read_u32_array(node, key,
+		therm_sampling_data, THERM_SAMP_MAX_ENTRY);
+	if (ret)
+		goto PROBE_DYN_EXIT;
+
+	tsens_sampling = devm_kzalloc(&pdev->dev, sizeof(*tsens_sampling),
+				GFP_KERNEL);
+	if (!tsens_sampling) {
+		ret = -ENOMEM;
+		goto PROBE_DYN_EXIT;
+	}
+
+	ret = therm_tsens_dynamic_sampling_init(
+			therm_sampling_data[THERM_SAMP_REQ_LVL],
+			therm_sampling_data[THERM_SAMP_DEF_LVL]);
+	if (ret < 0) {
+		pr_err("Therm dynamic sampling init failed, err:%d\n", ret);
+		goto PROBE_DYN_EXIT;
+	}
+
+	tsens_sampling->max_lvl = ret;
+	tsens_sampling->req_lvl = therm_sampling_data[THERM_SAMP_REQ_LVL];
+	tsens_sampling->def_lvl = therm_sampling_data[THERM_SAMP_DEF_LVL];
+	tsens_sampling->cur_lvl = tsens_sampling->max_lvl;
+
+	msm_thermal_handle_dynamic_sampling(false);
+
+	ret = sensor_mgr_init_threshold(&thresh[MSM_THERM_HW_SAMPLING],
+		therm_sampling_data[THERM_SAMP_SENS_ID],
+		therm_sampling_data[THERM_SAMP_HIGH_TEMP],
+		therm_sampling_data[THERM_SAMP_LOW_TEMP],
+		therm_dynamic_sampling_notify);
+	if (ret) {
+		pr_err("Therm dynamic sampling data structure init failed\n");
+		goto PROBE_DYN_EXIT;
+	}
+
+	tsens_sampling->enabled = true;
+	snprintf(mit_config[MSM_THERM_HW_SAMPLING].config_name,
+		MAX_DEBUGFS_CONFIG_LEN, "tsens_sampling");
+	mit_config[MSM_THERM_HW_SAMPLING].disable_config
+		= thermal_dynamic_sampling_disable;
+
+PROBE_DYN_EXIT:
+	if (ret) {
+		dev_info(&pdev->dev,
+		"%s:Failed reading node=%s, key=%s err=%d. KTM continues\n",
+			__func__, node->full_name, key, ret);
+		if (tsens_sampling)
+			devm_kfree(&pdev->dev, tsens_sampling);
+		tsens_sampling = NULL;
+	}
+	return ret;
+}
+
 static int probe_therm_reset(struct device_node *node,
 		struct msm_thermal_data *data,
 		struct platform_device *pdev)
@@ -6743,6 +7321,9 @@ static void thermal_mx_config_read(struct seq_file *m, void *data)
 		if (vdd_cx)
 			seq_printf(m, "cx retention value:%d\n",
 				msm_thermal_info.vdd_cx_min);
+		if (msm_thermal_info.vdd_mx_sensor_id != MONITOR_ALL_TSENS)
+			seq_printf(m, "tsens sensor:tsens_tz_sensor%d\n",
+				msm_thermal_info.vdd_mx_sensor_id);
 	}
 }
 
@@ -6800,6 +7381,39 @@ static void thermal_ocr_config_read(struct seq_file *m, void *data)
 	}
 }
 
+static void therm_ddr_lm_config_read(struct seq_file *m, void *data)
+{
+	if (therm_ddr_lm_enabled) {
+		seq_puts(m, "\n-----DDR Restriction(DDR LM)-----\n");
+		seq_printf(m, "threshold:%ld degC\n",
+			thresh[
+			MSM_THERM_DDR_LM].thresh_list->threshold[0].temp);
+		seq_printf(m, "threshold clear:%ld degC\n",
+			thresh[
+			MSM_THERM_DDR_LM].thresh_list->threshold[1].temp);
+		seq_printf(m, "tsens sensor:tsens_tz_sensor%d\n",
+			thresh[MSM_THERM_DDR_LM].thresh_list->sensor_id);
+	}
+}
+
+static void therm_dynamic_sampling_config_read(struct seq_file *m, void *data)
+{
+	if (tsens_sampling && tsens_sampling->enabled) {
+		seq_puts(m, "\n-----Dynamic HW sampling-----\n");
+		seq_printf(m, "threshold:%ld degC\n",
+			thresh[
+			MSM_THERM_HW_SAMPLING].thresh_list->threshold[0].temp /
+				tsens_scaling_factor);
+		seq_printf(m, "threshold clear:%ld degC\n",
+			thresh[
+			MSM_THERM_HW_SAMPLING].thresh_list->threshold[1].temp /
+				tsens_scaling_factor);
+		seq_printf(m, "sensor id:%d id_type:%d\n",
+			thresh[MSM_THERM_HW_SAMPLING].thresh_list->sensor_id,
+			thresh[MSM_THERM_HW_SAMPLING].thresh_list->id_type);
+	}
+}
+
 static void thermal_phase_ctrl_config_read(struct seq_file *m, void *data)
 {
 	if (cx_phase_ctrl_enabled) {
@@ -6838,6 +7452,8 @@ static void thermal_disable_all_mitigation(void)
 	thermal_vdd_mit_disable();
 	thermal_psm_mit_disable();
 	thermal_ocr_mit_disable();
+	thermal_ddr_lm_disable();
+	thermal_dynamic_sampling_disable();
 	thermal_cx_phase_ctrl_mit_disable();
 	thermal_gfx_phase_warm_ctrl_mit_disable();
 	thermal_gfx_phase_crit_ctrl_mit_disable();
@@ -6866,6 +7482,12 @@ static void enable_config(int config_id)
 		break;
 	case MSM_VDD_MX_RESTRICTION:
 		vdd_mx_enabled = 1;
+		break;
+	case MSM_THERM_DDR_LM:
+		therm_ddr_lm_enabled = 1;
+		break;
+	case MSM_THERM_HW_SAMPLING:
+		tsens_sampling->enabled = 1;
 		break;
 	case MSM_LIST_MAX_NR + HOTPLUG_CONFIG:
 		hotplug_enabled = 1;
@@ -6970,6 +7592,8 @@ static int thermal_config_debugfs_read(struct seq_file *m, void *data)
 	thermal_psm_config_read(m, data);
 	thermal_ocr_config_read(m, data);
 	thermal_phase_ctrl_config_read(m, data);
+	therm_ddr_lm_config_read(m, data);
+	therm_dynamic_sampling_config_read(m, data);
 
 	return 0;
 }
@@ -7053,6 +7677,7 @@ static int msm_thermal_dev_probe(struct platform_device *pdev)
 		goto fail;
 	ret = probe_ocr(node, &data, pdev);
 
+	ret = probe_therm_dynamic_hw_sampling(node, &data, pdev);
 	ret = fetch_cpu_mitigaiton_info(&data, pdev);
 	if (ret) {
 		pr_err("Error fetching CPU mitigation information. err:%d\n",
@@ -7087,11 +7712,6 @@ static int msm_thermal_dev_probe(struct platform_device *pdev)
 	msm_thermal_ioctl_init();
 	ret = msm_thermal_init(&data);
 	msm_thermal_probed = true;
-
-	if (interrupt_mode_enable) {
-		interrupt_mode_init();
-		interrupt_mode_enable = false;
-	}
 
 	return ret;
 fail:
@@ -7164,6 +7784,15 @@ static int msm_thermal_dev_exit(struct platform_device *inp_dev)
 				&thresh[MSM_VDD_MX_RESTRICTION]);
 			kfree(thresh[MSM_VDD_MX_RESTRICTION].thresh_list);
 		}
+		if (therm_ddr_lm_enabled) {
+			sensor_mgr_remove_threshold(
+				&thresh[MSM_THERM_DDR_LM]);
+			cleanup_bus_data(therm_ddr_lm_data, inp_dev);
+		}
+		if (tsens_sampling)
+			sensor_mgr_remove_threshold(
+				&thresh[MSM_THERM_HW_SAMPLING]);
+
 		kfree(thresh);
 		thresh = NULL;
 	}
@@ -7216,6 +7845,7 @@ int __init msm_thermal_late_init(void)
 	if (!msm_thermal_probed)
 		return 0;
 
+	probe_therm_ddr_lm(msm_thermal_info.pdev);
 	if (num_possible_cpus() > 1)
 		msm_thermal_add_cc_nodes();
 	msm_thermal_add_psm_nodes();
@@ -7228,7 +7858,6 @@ int __init msm_thermal_late_init(void)
 		}
 	}
 	msm_thermal_add_mx_nodes();
-	interrupt_mode_init();
 	create_cpu_topology_sysfs();
 	create_thermal_debugfs();
 	msm_thermal_add_bucket_info_nodes();
