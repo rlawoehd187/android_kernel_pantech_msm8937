@@ -12,8 +12,7 @@
 
 #include "dsi-panel-nt35695-1080p-video-ef71.dtsi"
 #include "dsi-panel-nt35695-1080p-cmd-ef71.dtsi"
-//#include "dsi-panel-nt35531-1080p-video-ef78.dtsi"
-//#include "dsi-panel-nt35531-1080p-cmd-ef78.dtsi"
+
 /*
 #include "dsi-panel-sim-video.dtsi"
 #include "dsi-panel-sim-cmd.dtsi"

@@ -153,7 +153,7 @@
 
 			qcom,speed-bin = <0>;
 
-			qcom,initial-pwrlevel = <6>;
+			qcom,initial-pwrlevel = <5>;
 
 			qcom,gpu-pwrlevel@0 {
 				reg = <0>;
@@ -342,6 +342,8 @@
 
 			};
 		};
+<<<<<<< HEAD
+=======
 
 		qcom,gpu-pwrlevels-3 {
 			#address-cells = <1>;
@@ -415,6 +417,7 @@
 				qcom,bus-max = <0>;
 			};
 		};
+>>>>>>> 45e8572eb2d888ddba9b0f49d7f0c5d7ec9606ea
 	};
 };
 
