@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2011-2019 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -259,6 +259,7 @@ typedef enum eMonFilterType{
 #define WE_MOTION_DET_START_STOP                  93
 #define WE_MOTION_DET_BASE_LINE_START_STOP        94
 #endif
+#define WE_SET_WOW_START                          95
 
 /* Private ioctls and their sub-ioctls */
 #define WLAN_PRIV_SET_NONE_GET_INT                (SIOCIWFIRSTPRIV + 1)
@@ -320,6 +321,7 @@ typedef enum eMonFilterType{
 #define WE_GET_TEMPERATURE                        56
 #define WE_GET_FW_STATUS                          57
 #define WE_CAP_TSF                                58
+#define WE_PBM_MP_GET_REASON                      59
 
 /* Private ioctls and their sub-ioctls */
 #define WLAN_PRIV_SET_INT_GET_INT                 (SIOCIWFIRSTPRIV + 2)
@@ -339,6 +341,8 @@ typedef enum eMonFilterType{
 #define WE_SET_WLAN_DBG                           1
 #define WE_SET_DP_TRACE                           2
 #define WE_SET_SAP_CHANNELS                       3
+#define WE_SET_ADD_EASY_WOW_PORT                  4
+#define WE_SET_RM_EASY_WOW_PORT                   5
 
 /* Private ioctls and their sub-ioctls */
 #define WLAN_PRIV_GET_CHAR_SET_NONE               (SIOCIWFIRSTPRIV + 5)
@@ -363,6 +367,7 @@ typedef enum eMonFilterType{
 #define WE_GET_OEM_DATA_CAP                       13
 #endif
 #define WE_GET_SNR                                14
+#define WE_GET_PS_TDCC                            15
 
 /* Private ioctls and their sub-ioctls */
 #define WLAN_PRIV_SET_NONE_GET_NONE               (SIOCIWFIRSTPRIV + 6)
@@ -406,6 +411,7 @@ typedef enum eMonFilterType{
 #undef  MAX_VAR_ARGS
 #define MAX_VAR_ARGS                              11
 #else
+#undef  MAX_VAR_ARGS
 #define MAX_VAR_ARGS                              7
 #endif
 
@@ -416,6 +422,7 @@ typedef enum eMonFilterType{
 #define WE_MOTION_DET_BASE_LINE_CONFIG_PARAM      13
 #endif
 #define WE_SET_THERMAL_THROTTLE_CONFIG            14
+#define WE_SET_HPCS_PULSE_PARAMS_CONFIG           15
 
 /* Private ioctls (with no sub-ioctls) */
 /* note that they must be odd so that they have "get" semantics */
@@ -497,6 +504,7 @@ typedef enum eMonFilterType{
 #define WLAN_STATS_TX_UC_BYTE_CNT                 19
 #define WLAN_STATS_TX_MC_BYTE_CNT                 20
 #define WLAN_STATS_TX_BC_BYTE_CNT                 21
+#define WE_SET_PS_TDCC                            22
 
 #define FILL_TLV(__p, __type, __size, __val, __tlen) do {           \
         if ((__tlen + __size + 2) < WE_MAX_STR_LEN)                 \
@@ -709,7 +717,7 @@ int hdd_priv_get_data(struct iw_point *p_priv_data,
    return 0;
 }
 
-#define WLAN_HDD_MAX_BW_VALUE	5
+#define WLAN_HDD_MAX_BW_VALUE	6
 
 /**
  * wlan_hdd_validate_mon_channel() - check channel number is valid or not
@@ -751,7 +759,7 @@ VOS_STATUS wlan_hdd_validate_mon_bw(int ch, int bw)
             /* Check if bandwidth from user is valid in 2.4GHz */
             if ((ch >= rfChannels[RF_CHAN_1].channelNum) &&
                 (ch <= rfChannels[RF_CHAN_14].channelNum)) {
-                if (bw > 1) {
+                if ((bw != 5 && bw != 6) && bw > 1) {/* 5M bw == 5; 10M bw == 6 */
                    hddLog(VOS_TRACE_LEVEL_ERROR,
                        "Invalid bw %d for 2.4GHz Chan [%d]",bw,ch);
                    return VOS_STATUS_E_INVAL;
@@ -918,6 +926,10 @@ void hdd_wlan_get_version(hdd_adapter_t *pAdapter, union iwreq_data *wrqu,
 
     hdd_context_t *pHddContext;
     int i = 0;
+#ifdef CLD_REGDB
+    struct wiphy *wiphy = NULL;
+    int j;
+#endif
 
     pHddContext = WLAN_HDD_GET_CTX(pAdapter);
     if (!pHddContext) {
@@ -965,6 +977,21 @@ void hdd_wlan_get_version(hdd_adapter_t *pAdapter, union iwreq_data *wrqu,
                 CRMId,
                 pHWversion);
     }
+
+#ifdef CLD_REGDB
+    wiphy = pHddContext->wiphy;
+    for (i = 0; i < IEEE80211_NUM_BANDS; i++) {
+        if (NULL == wiphy->bands[i])
+            continue;
+
+        for (j = 0; j < wiphy->bands[i]->n_channels; j++) {
+            struct ieee80211_supported_band *band = wiphy->bands[i];
+            printk("[CLD-REGDB-DEBUG]: channel %d flags 0x%x\n",
+                   band->channels[j].center_freq, band->channels[j].flags);
+        }
+    }
+#endif
+
 error:
     return;
 }
@@ -1081,7 +1108,6 @@ eHalStatus hdd_wlan_get_ibss_peer_info_all(hdd_adapter_t *pAdapter)
 
 int hdd_wlan_get_rts_threshold(hdd_adapter_t *pAdapter, union iwreq_data *wrqu)
 {
-    tHalHandle hHal = WLAN_HDD_GET_HAL_CTX(pAdapter);
     v_U32_t threshold = 0;
     hdd_context_t *hdd_ctx;
     int ret;
@@ -1100,8 +1126,9 @@ int hdd_wlan_get_rts_threshold(hdd_adapter_t *pAdapter, union iwreq_data *wrqu)
         return ret;
 
 
-    if ( eHAL_STATUS_SUCCESS !=
-                     ccmCfgGetInt(hHal, WNI_CFG_RTS_THRESHOLD, &threshold) )
+    if (eHAL_STATUS_SUCCESS !=
+                        ccmCfgGetInt(WLAN_HDD_GET_HAL_CTX(pAdapter),
+                                     WNI_CFG_RTS_THRESHOLD, &threshold))
     {
        VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_WARN,
                       FL("failed to get ini parameter, WNI_CFG_RTS_THRESHOLD"));
@@ -3484,6 +3511,32 @@ static void iw_power_offload_callback_fn(void *context, tANI_U32 session_id,
 	hdd_request_put(request);
 }
 
+/**
+ * iw_offload_disable_pwr_cb() - Callback function registered with PMC to
+ * know status of PMC request
+ *
+ * @context: pointer to calling context
+ * @session_id: session_id
+ * @status: eHAL_STATUS_SUCCESS if success else eHalStatus error code
+ *
+ * Return:
+ */
+static void iw_offload_disable_pwr_cb(void *context, tANI_U32 session_id,
+				      eHalStatus status)
+{
+	struct hdd_request *request;
+
+	request = hdd_request_get(context);
+	if (!request) {
+		hddLog(VOS_TRACE_LEVEL_ERROR, "%s: Obsolete request",
+		       __func__);
+		return;
+	}
+
+	hdd_request_complete(request);
+	hdd_request_put(request);
+}
+
 /* Callback function for tx per hit */
 void hdd_tx_per_hit_cb (void *pCallbackContext)
 {
@@ -3682,8 +3735,10 @@ static void hdd_get_station_statistics_cb(void *stats, void *context)
  */
 VOS_STATUS wlan_hdd_get_station_stats(hdd_adapter_t *pAdapter)
 {
-	hdd_station_ctx_t *pHddStaCtx = WLAN_HDD_GET_STATION_CTX_PTR(pAdapter);
+	hdd_station_ctx_t *pHddStaCtx;
+	hdd_ap_ctx_t *sap_ctx;
 	eHalStatus hstatus;
+	tANI_U8 sta_id;
 	int ret;
 	void *cookie;
 	struct hdd_request *request;
@@ -3696,6 +3751,14 @@ VOS_STATUS wlan_hdd_get_station_stats(hdd_adapter_t *pAdapter)
 	if (NULL == pAdapter) {
 		hddLog(VOS_TRACE_LEVEL_ERROR, "%s: pAdapter is NULL", __func__);
 		return VOS_STATUS_SUCCESS;
+	}
+
+	if (pAdapter->device_mode == WLAN_HDD_SOFTAP) {
+		sap_ctx = WLAN_HDD_GET_AP_CTX_PTR(pAdapter);
+		sta_id = sap_ctx->uBCStaId;
+	} else {
+		pHddStaCtx = WLAN_HDD_GET_STATION_CTX_PTR(pAdapter);
+		sta_id = pHddStaCtx->conn_info.staId[0];
 	}
 
 	request = hdd_request_alloc(&params);
@@ -3715,7 +3778,7 @@ VOS_STATUS wlan_hdd_get_station_stats(hdd_adapter_t *pAdapter)
 				     hdd_get_station_statistics_cb,
 				     0, /* not periodic */
 				     FALSE, /* non-cached results */
-				     pHddStaCtx->conn_info.staId[0],
+				     sta_id,
 				     cookie, pAdapter->sessionId);
 	if (eHAL_STATUS_SUCCESS != hstatus) {
 		hddLog(VOS_TRACE_LEVEL_ERROR,
@@ -5285,7 +5348,7 @@ int wlan_hdd_update_phymode(struct net_device *net, tHalHandle hal,
 #endif
     v_BOOL_t band_24 = VOS_FALSE, band_5g = VOS_FALSE;
     v_BOOL_t ch_bond24 = VOS_FALSE, ch_bond5g = VOS_FALSE;
-    tSmeConfigParams smeconfig;
+    tSmeConfigParams smeconfig = {{0}};
     tANI_U32 chwidth = WNI_CFG_CHANNEL_BONDING_MODE_DISABLE;
 #ifdef WLAN_FEATURE_11AC
     tANI_U32 vhtchanwidth;
@@ -5941,6 +6004,85 @@ static int __iw_setint_getnone(struct net_device *dev,
 #endif
               case  14://reset wlan (power down/power up)
                  break;
+              case  15:
+                  if (NULL == hHal) {
+                      hddLog(VOS_TRACE_LEVEL_ERROR,
+                             "%s: mac ptr NULL when setpwr param 15",
+                             __func__);
+                      return -EINVAL;
+                  }
+
+                  if (!(pHddCtx->cfg_ini->enablePowersaveOffload &&
+                      (false == pHddCtx->is_mon_enable) &&
+                      ((WLAN_HDD_INFRA_STATION == pAdapter->device_mode) ||
+                      (WLAN_HDD_P2P_CLIENT == pAdapter->device_mode)))) {
+                      hddLog(LOGE, "device mode not support enable bmps dyn");
+                      return -EIO;
+                  }
+
+                  sme_EnablePowerSave(hHal, ePMC_BEACON_MODE_POWER_SAVE);
+                  sme_ConfigEnablePowerSave(pHddCtx->hHal,
+                                            ePMC_BEACON_MODE_POWER_SAVE);
+
+                  if (hdd_connIsConnected(pHddStaCtx))
+                      sme_PsOffloadEnablePowerSave(hHal, pAdapter->sessionId);
+                  break;
+              case  16:
+              {
+                  struct hdd_request *request;
+                  void *cookie;
+                  static const struct hdd_request_params params = {
+                      .priv_size = 0,
+                      .timeout_ms = WLAN_WAIT_TIME_POWER,
+                  };
+                  eHalStatus status = eHAL_STATUS_FAILURE;
+
+                  if (NULL == hHal) {
+                      hddLog(VOS_TRACE_LEVEL_ERROR,
+                             "%s: mac ptr NULL when setpwr param 16",
+                             __func__);
+                      return -EINVAL;
+                  }
+
+                  if (!(pHddCtx->cfg_ini->enablePowersaveOffload &&
+                      ((WLAN_HDD_INFRA_STATION == pAdapter->device_mode) ||
+                      (WLAN_HDD_P2P_CLIENT == pAdapter->device_mode)))) {
+                     hddLog(LOGE, "device mode not support disable bmps dyn");
+                     return -EIO;
+                  }
+
+                  request = hdd_request_alloc(&params);
+                  if (!request) {
+                      hddLog(VOS_TRACE_LEVEL_ERROR,
+                             "%s: Request alloc fail for disable bmps dyn",
+                             __func__);
+                      return VOS_STATUS_E_NOMEM;
+                  }
+
+                  cookie = hdd_request_cookie(request);
+                  status =
+                      sme_PsOffloadDisablePowerSave(hHal,
+                                                    iw_offload_disable_pwr_cb,
+                                                    cookie, pAdapter->sessionId);
+                  if (eHAL_STATUS_PMC_PENDING == status) {
+                      if (hdd_request_wait_for_response(request)) {
+                          hddLog(VOS_TRACE_LEVEL_ERROR,
+                                 FL("SME timed out when req full power"));
+                      }
+                  }
+
+                  /*
+                   * either we never sent a request, we sent a request and
+                   * received a response or we sent a request and timed out.
+                   * regardless we are done with the request.
+                   */
+                  hdd_request_put(request);
+                  sme_DisablePowerSave(hHal, ePMC_BEACON_MODE_POWER_SAVE);
+                  sme_ConfigDisablePowerSave(pHddCtx->hHal,
+                                             ePMC_BEACON_MODE_POWER_SAVE);
+                  hddLog(LOGE, "iwpriv req Full Power completed");
+                  break;
+              }
               default:
                  hddLog(LOGE, "Invalid arg  %d in WE_SET_POWER IOCTL", set_value);
                  ret = -EINVAL;
@@ -7111,6 +7253,20 @@ static int __iw_setint_getnone(struct net_device *dev,
             }
             break;
 #endif
+#ifdef FEATURE_PBM_MAGIC_WOW
+        case WE_SET_WOW_START:
+        {
+            if ((set_value != 1) && (set_value != 0)) {
+                hddLog(LOGE, "Invalid value %d set wow_start", set_value);
+                return -EINVAL;
+            }
+            if (set_value)
+                hdd_start_wow_nonos(pAdapter);
+	    else
+                hdd_stop_wow_nonos(pAdapter);
+	    break;
+        }
+#endif
         default:
         {
             hddLog(LOGE, "%s: Invalid sub command %d", __func__, sub_cmd);
@@ -7195,11 +7351,13 @@ static int __iw_setchar_getnone(struct net_device *dev,
     {
        case WE_WOWL_ADD_PTRN:
           VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_INFO, "ADD_PTRN");
-          hdd_add_wowl_ptrn(pAdapter, pBuffer);
+          if (!hdd_add_wowl_ptrn(pAdapter, pBuffer))
+             ret = -EINVAL;
           break;
        case WE_WOWL_DEL_PTRN:
           VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_INFO, "DEL_PTRN");
-          hdd_del_wowl_ptrn(pAdapter, pBuffer);
+          if (!hdd_del_wowl_ptrn(pAdapter, pBuffer))
+             ret = -EINVAL;
           break;
 #if defined WLAN_FEATURE_VOWIFI
        case WE_NEIGHBOR_REPORT_REQUEST:
@@ -7361,6 +7519,8 @@ static int __iw_setnone_getint(struct net_device *dev,
        hddLog(LOGE, FL("session id is not valid %d"), pAdapter->sessionId);
        return -EINVAL;
     }
+
+    vos_mem_zero(&smeConfig, sizeof(smeConfig));
 
     switch (value[0])
     {
@@ -7860,6 +8020,14 @@ static int __iw_setnone_getint(struct net_device *dev,
             ret = hdd_capture_tsf(pAdapter, (uint32_t *)value, 1);
             break;
         }
+#ifdef FEATURE_PBM_MAGIC_WOW
+        case WE_PBM_MP_GET_REASON:
+        {
+            *value = (uint32_t)wma_wow_get_pbm_mp_reason(wmapvosContext) & 0xFF;
+            hddLog(LOGE, "PBM wow reason %d", *value);
+            break;
+        }
+#endif
         default:
         {
            hddLog(LOGE, "Invalid IOCTL get_value command %d", value[0]);
@@ -7930,7 +8098,16 @@ static int __iw_set_three_ints_getnone(struct net_device *dev,
             hdd_ctx->cfg_ini->force_sap_acs_end_ch = value[2];
         }
         break;
-
+#ifdef FEATURE_PBM_MAGIC_WOW
+    case WE_SET_ADD_EASY_WOW_PORT:
+        if (!hdd_add_easy_wow_ptrn(pAdapter, value[1], value[2], 0, 0, value[3]))
+            ret = -EINVAL;
+        break;
+    case WE_SET_RM_EASY_WOW_PORT:
+        if (!hdd_del_easy_wow_ptrn(pAdapter, value[1], value[2], 0, 0, value[3]))
+            ret = -EINVAL;
+        break;
+#endif
     default:
        hddLog(LOGE, "%s: Invalid IOCTL command %d", __func__, sub_cmd );
        break;
@@ -8407,6 +8584,11 @@ static int __iw_get_char_setnone(struct net_device *dev,
             wrqu->data.length = strlen(extra) + 1;
             break;
         }
+        case WE_GET_PS_TDCC:
+        {
+            return hdd_wlan_get_ps_tdcc_info(pAdapter, &(wrqu->data.length),
+                                             extra, WE_MAX_STR_LEN);
+        }
         default:
         {
             hddLog(LOGE, "%s: Invalid IOCTL command %d", __func__, sub_cmd );
@@ -8602,11 +8784,11 @@ void hdd_wmm_tx_snapshot(hdd_adapter_t *pAdapter)
     int i = 0, j = 0;
     for ( i=0; i< NUM_TX_QUEUES; i++)
     {
-        spin_lock_bh(&pAdapter->wmm_tx_queue[i].lock);
+        adf_os_spin_lock_bh(&pAdapter->wmm_tx_queue[i].lock);
         hddLog(LOGE, "HDD WMM TxQueue Info For AC: %d Count: %d PrevAdress:%pK, NextAddress:%pK",
                i, pAdapter->wmm_tx_queue[i].count,
                pAdapter->wmm_tx_queue[i].anchor.prev, pAdapter->wmm_tx_queue[i].anchor.next);
-        spin_unlock_bh(&pAdapter->wmm_tx_queue[i].lock);
+        adf_os_spin_unlock_bh(&pAdapter->wmm_tx_queue[i].lock);
     }
 
     for(i =0; i<WLAN_MAX_STA_COUNT; i++)
@@ -8616,17 +8798,139 @@ void hdd_wmm_tx_snapshot(hdd_adapter_t *pAdapter)
              hddLog(LOGE, "******STAIndex: %d*********", i);
              for ( j=0; j< NUM_TX_QUEUES; j++)
              {
-                spin_lock_bh(&pAdapter->aStaInfo[i].wmm_tx_queue[j].lock);
+                adf_os_spin_lock_bh(&pAdapter->aStaInfo[i].wmm_tx_queue[j].lock);
                 hddLog(LOGE, "HDD TxQueue Info For AC: %d Count: %d PrevAdress:%pK, NextAddress:%pK",
                        j, pAdapter->aStaInfo[i].wmm_tx_queue[j].count,
                        pAdapter->aStaInfo[i].wmm_tx_queue[j].anchor.prev,
                        pAdapter->aStaInfo[i].wmm_tx_queue[j].anchor.next);
-                spin_unlock_bh(&pAdapter->aStaInfo[i].wmm_tx_queue[j].lock);
+                adf_os_spin_unlock_bh(&pAdapter->aStaInfo[i].wmm_tx_queue[j].lock);
              }
         }
     }
 
 }
+
+#ifdef AUDIO_MULTICAST_AGGR_SUPPORT
+static int wlan_hdd_set_multicast_rate(hdd_adapter_t *pAdapter,
+				int * args)
+{
+	struct audio_multicast_aggr *pMultiAggr = &pAdapter->multicast_aggr;
+	struct audio_multicast_group *pMultiGroup;
+	struct audio_multicast_group *pMultiGroup2;
+	int i = 0;
+	int group_id,num_rate_set;
+	vos_msg_t msg;
+
+	if (pMultiAggr->aggr_enable != 1) {
+		hddLog(LOGW, FL("multicast aggr not enabled"));
+		return -EINVAL;
+	}
+
+	num_rate_set = args[1];
+	if (num_rate_set <= 0 || num_rate_set > MAX_NUM_RATE_SET) {
+		hddLog(LOGW, FL("Invalid num_rate_set%d"), num_rate_set);
+		return -EINVAL;
+	}
+
+	group_id = args[0];
+	if (group_id < 0 || group_id >= MAX_GROUP_NUM) {
+		hddLog(LOGW, FL("Invalid group id %d"), group_id);
+		return -EINVAL;
+	}
+	pMultiGroup2 = &pMultiAggr->multicast_group[group_id];
+
+	pMultiGroup = vos_mem_malloc(sizeof(struct audio_multicast_group));
+	if (NULL == pMultiGroup) {
+		hddLog(LOGE,
+		FL("vos_mem_alloc failed for pMultiRate"));
+		return -ENOMEM;
+	}
+	adf_os_mem_zero(pMultiGroup, sizeof(struct audio_multicast_group));
+
+	pMultiGroup->group_id = group_id;
+	pMultiGroup->num_rate_set= num_rate_set;
+	for (i = 0; i < num_rate_set; i++) {
+		pMultiGroup->rate_set[i].mcs = args[2+2*i];
+		pMultiGroup->rate_set[i].bandwith = args[3+2*i];
+	}
+
+	msg.type = WDA_SET_MULTICAST_RATE;
+	msg.reserved = 0;
+	msg.bodyptr = pMultiGroup;
+	if (VOS_STATUS_SUCCESS != vos_mq_post_message(VOS_MODULE_ID_WDA,
+						&msg)) {
+		vos_mem_free(pMultiGroup);
+		VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_ERROR,
+			FL("Not able to post Set Multicast group Rate message to WDA"));
+		return -EINVAL;
+	}
+	pMultiGroup2->num_rate_set = pMultiGroup->num_rate_set;
+	for (i = 0; i < pMultiGroup2->num_rate_set; i++) {
+		pMultiGroup2->rate_set[i].mcs = pMultiGroup->rate_set[i].mcs;
+		pMultiGroup2->rate_set[i].bandwith = pMultiGroup->rate_set[i].bandwith;
+	}
+	VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_INFO,
+		FL("set Multicast Rate group%d num_rate_set%d"), group_id, num_rate_set);
+
+	return VOS_STATUS_SUCCESS;
+}
+
+int
+wlan_hdd_set_multicast_retry_limit(hdd_adapter_t *adapter,
+			int group_id,int retry_limit)
+{
+	int ret;
+	struct audio_multicast_aggr *pMultiAggr = &adapter->multicast_aggr;
+	struct audio_multicast_group *pMultiGroup;
+
+	if (group_id < 0 || group_id >= MAX_GROUP_NUM) {
+		hddLog(LOGW, FL("Invalid group id %d"), group_id);
+		return -EINVAL;
+	}
+	if (retry_limit < 0 || retry_limit > MAX_RETRY_LIMIT) {
+		hddLog(LOGW, FL("Invalid Retry Limit %d"), retry_limit);
+		return -EINVAL;
+	}
+
+	ret = process_wma_set_command_twoargs((int)adapter->sessionId,
+					       (int)GEN_PARAM_MULTICAST_RETRY_LIMIT,
+					       group_id, retry_limit, GEN_CMD);
+
+	if (!ret) {
+		pMultiGroup = &pMultiAggr->multicast_group[group_id];
+		pMultiGroup->retry_limit = retry_limit;
+	}
+	return ret;
+}
+
+int
+wlan_hdd_multicast_aggr_enable(hdd_adapter_t *adapter,
+						int aggr_enable, int tbd_enable)
+{
+	int ret;
+	struct audio_multicast_aggr *pMultiAggr = &adapter->multicast_aggr;
+
+	if (aggr_enable != 0 && aggr_enable != 1) {
+		hddLog(LOGW, FL("Invalid input %d"), aggr_enable);
+		return -EINVAL;
+	}
+	if (tbd_enable != 0 && tbd_enable != 1) {
+		hddLog(LOGW, FL("Invalid input %d"), aggr_enable);
+		return -EINVAL;
+	}
+
+	ret = process_wma_set_command_twoargs((int)adapter->sessionId,
+						   (int)GEN_PARAM_MULTICAST_AGGR_ENABLED,
+						   aggr_enable, tbd_enable, GEN_CMD);
+
+	if (!ret) {
+		pMultiAggr->aggr_enable = aggr_enable;
+		pMultiAggr->tbd_enable = tbd_enable;
+	}
+	return ret;
+}
+
+#endif
 
 static int __iw_set_var_ints_getnone(struct net_device *dev,
                                      struct iw_request_info *info,
@@ -9002,6 +9306,59 @@ static int __iw_set_var_ints_getnone(struct net_device *dev,
             }
             break;
 
+        case WE_SET_HPCS_PULSE_PARAMS_CONFIG:
+            {
+                tSirHpcsPulseParmasConfig config;
+                if (num_args != 6) {
+                    hddLog(LOGE, FL("setHpcsParams: 6 args are required\n"
+                           "Ex: iwpriv wlan0 setHpcsParams start sync_time "
+                           "pulse_interval active_sync_period gpio_pin pulse_width"));
+                    return -EINVAL;
+                }
+
+                if ((0 == apps_args[0]) && (0 == apps_args[1])
+                    && (0 == apps_args[2]) && (0 == apps_args[3])
+                    && (0 == apps_args[4]) && (0 == apps_args[5])) {
+                    hddLog(LOGE, FL("setHpcsParams: reset params"));
+                } else if (apps_args[0] < 0 || apps_args[0] > 1
+                    || apps_args[1] < 0 || apps_args[2] <= 10000
+                    || apps_args[3] < 0 || apps_args[4] < 0
+                    || apps_args[5] < 10000) {
+                    hddLog(LOGE, FL("setHpcsParams: Invalid values"));
+                    return -EINVAL;
+                }
+
+                hddLog(LOG1, "setHpcsParams vdev_id:%d args %x %x %x %x %x %x\n",
+                              pAdapter->sessionId, apps_args[0], apps_args[1],
+                              apps_args[2], apps_args[3], apps_args[4], apps_args[5]);
+
+                config.vdev_id            = pAdapter->sessionId;
+                config.start              = apps_args[0];
+                config.sync_time          = apps_args[1];
+                config.pulse_interval     = apps_args[2];
+                config.active_sync_period = apps_args[3];
+                config.gpio_pin           = apps_args[4];
+                config.pulse_width        = apps_args[5];
+
+                ret = sme_hpcs_pulse_params_conf_cmd(pAdapter, &config);
+
+                if (ret != eHAL_STATUS_SUCCESS)
+                    return -EINVAL;
+            }
+            break;
+#ifdef AUDIO_MULTICAST_AGGR_SUPPORT
+        case WE_AUDIO_AGGR_SET_GROUP_RATE:
+        {
+                if (num_args != (2 + 2*apps_args[1])) {
+                        hddLog(LOGE, FL("au_set_rate: Invalid arguments"));
+                        return -EINVAL;
+                }
+                ret = wlan_hdd_set_multicast_rate(pAdapter, apps_args);
+                if (ret != eHAL_STATUS_SUCCESS)
+                return -EINVAL;
+        }
+        break;
+#endif
         default:
             {
                 hddLog(LOGE, FL("Invalid IOCTL command %d"), sub_cmd );
@@ -11251,6 +11608,78 @@ VOS_STATUS iw_set_power_params(struct net_device *dev, struct iw_request_info *i
   return VOS_STATUS_SUCCESS;
 }/*iw_set_power_params*/
 
+int hdd_wlan_get_ps_tdcc_info(hdd_adapter_t *adapter,
+			      uint16_t *length,
+			      char *buffer,
+			      uint16_t buf_len)
+{
+	int32_t tdcc_enable, tdcc_percent, ret;
+	uint32_t len;
+
+	ret = wlan_hdd_process_tdcc_ps(adapter, PS_TDCC_GET,
+				       &tdcc_enable, &tdcc_percent);
+	if (ret)
+		return ret;
+
+	len = snprintf(buffer, buf_len, "\nTDCC enable=%d percent=%d\n",
+		       tdcc_enable, tdcc_percent);
+	if (len >= buf_len) {
+		hddLog(LOGE, "Insufficient buffer:%d, %d", buf_len, len);
+		return -E2BIG;
+	}
+
+	*length = len + 1;
+	return 0;
+}
+
+int wlan_hdd_process_tdcc_ps(hdd_adapter_t *adapter,
+			     enum tdcc_cmd_type cmd,
+			     int *enable, int *percentage)
+{
+	static int32_t ps_tdcc_enabled = 0;
+	static int32_t ps_tdcc_percent = 0;
+
+	if ((!enable || !percentage) && cmd != PS_TDCC_RESET) {
+		hddLog(LOGE, "Input enable/percentage null pointer");
+		return -EINVAL;
+	}
+
+	switch (cmd) {
+	case PS_TDCC_SET:
+		if (*enable != 0 && *enable != 1) {
+			hddLog(LOGE, "Invalid tdcc enable/disable");
+			return -EINVAL;
+		}
+		if (*percentage < 0 || *percentage > 100) {
+			hddLog(LOGE, "Invalid tdcc duty cycle percentage");
+			return -EINVAL;
+		}
+		break;
+	case PS_TDCC_RESET:
+		ps_tdcc_enabled = 0;
+		ps_tdcc_percent = 0;
+		return 0;
+	case PS_TDCC_GET:
+		*enable = ps_tdcc_enabled;
+		*percentage = ps_tdcc_percent;
+		return 0;
+	default:
+		hddLog(LOGE, "Invalid tdcc command %d", cmd);
+		return -EINVAL;
+	}
+
+	if (*enable == ps_tdcc_enabled &&
+	    (*percentage == ps_tdcc_percent || *enable == 0))
+		return 0;
+
+	hddLog(LOG1, "Set tdcc enable:%d percentage:%d", *enable, *percentage);
+	ps_tdcc_enabled = *enable;
+	ps_tdcc_percent = *percentage;
+	return process_wma_set_command_twoargs((int)adapter->sessionId,
+					       (int)GEN_PARAM_PS_TDCC,
+					       *enable, *percentage, GEN_CMD);
+}
+
 static int __iw_set_two_ints_getnone(struct net_device *dev,
                                      struct iw_request_info *info,
                                      union iwreq_data *wrqu, char *extra)
@@ -11291,6 +11720,10 @@ static int __iw_set_two_ints_getnone(struct net_device *dev,
 
         break;
 #endif
+    case WE_SET_PS_TDCC:
+        ret = wlan_hdd_process_tdcc_ps(pAdapter, PS_TDCC_SET,
+                                       &value[1], &value[2]);
+        break;
     case WE_SET_MON_MODE_CHAN:
         /*
          * TODO: Remove this private implementation use standard
@@ -11328,10 +11761,10 @@ static int __iw_set_two_ints_getnone(struct net_device *dev,
             }
             vos_mem_zero(roam_profile, sizeof(*roam_profile));
 
-            if (vht_channel_width == 4) {
+            if (vht_channel_width == 5) {
                 vht_channel_width = 0;
                 roam_profile->sub20_channelwidth = SUB20_MODE_5MHZ;
-            } else if (vht_channel_width == 5) {
+            } else if (vht_channel_width == 6) {
                 vht_channel_width = 0;
                 roam_profile->sub20_channelwidth = SUB20_MODE_10MHZ;
             } else {
@@ -12294,7 +12727,17 @@ static const struct iw_priv_args we_private_args[] = {
         IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 3,
         0,
         "setsapchannels" },
+#ifdef FEATURE_PBM_MAGIC_WOW
+    {   WE_SET_ADD_EASY_WOW_PORT,
+        IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 3,
+        0,
+        "add_wow_port" },
 
+    {   WE_SET_RM_EASY_WOW_PORT,
+        IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 3,
+        0,
+        "rm_wow_port" },
+#endif
      /* handlers for main ioctl */
     {   WLAN_PRIV_SET_NONE_GET_THREE_INT,
         0,
@@ -12616,6 +13059,24 @@ static const struct iw_priv_args we_private_args[] = {
     {   WE_DUMP_DP_TRACE_LEVEL,
         IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 2,
         0, "dump_dp_trace"},
+    {   WE_SET_PS_TDCC,
+        IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 2,
+	0, "set_ps_tdcc" },
+    {   WE_GET_PS_TDCC,
+        0,
+        IW_PRIV_TYPE_CHAR | WE_MAX_STR_LEN,
+        "get_ps_tdcc" },
+#ifdef FEATURE_PBM_MAGIC_WOW
+    {
+        WE_SET_WOW_START,
+        IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1,
+        0, "wow_start" },
+    {
+        WE_PBM_MP_GET_REASON,
+        0,
+        IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1,
+        "get_wow_reason"},
+#endif
     {
         WLAN_PRIV_SET_FTIES,
         IW_PRIV_TYPE_CHAR | MAX_FTIE_SIZE,
@@ -12641,6 +13102,9 @@ static const struct iw_priv_args we_private_args[] = {
     {   WE_SET_THERMAL_THROTTLE_CONFIG,
         IW_PRIV_TYPE_INT | MAX_VAR_ARGS,
         0, "setThermalConfig" },
+    {   WE_SET_HPCS_PULSE_PARAMS_CONFIG,
+        IW_PRIV_TYPE_INT | MAX_VAR_ARGS,
+        0, "setHpcsParams" },
 };
 
 

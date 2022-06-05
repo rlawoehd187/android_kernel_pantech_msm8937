@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2018 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2013-2019 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -369,6 +369,27 @@ typedef enum {
         WMA_ROAM_PREAUTH_CHAN_CANCEL_REQUESTED,
         WMA_ROAM_PREAUTH_CHAN_COMPLETED
 } t_wma_roam_preauth_chan_state_t;
+
+#ifdef FEATURE_PBM_MAGIC_WOW
+/**
+ * enum pbm_mp_reason - enum of parsed wow reason
+ * @PBM_MP_REASON_MAGIC: wakeup by magic packet
+ * @PBM_MP_REASON_IPV4_UDP: wakeup by matched dst port ipv4 udp packet
+ * @PBM_MP_REASON_IPV4_TCP: wakeup by matched dst port ipv4 tcp packet
+ * @PBM_MP_REASON_IPV6_UDP: wakeup by matched dst port ipv6 udp packet
+ * @PBM_MP_REASON_IPV6_TCP: wakeup by matched dst port ipv6 tcp packet
+ * @PBM_MP_REASON_UNKNOWN: other reason
+ */
+enum pbm_mp_reason {
+	PBM_MP_REASON_MAGIC = 0,
+	PBM_MP_REASON_IPV4_UDP = 9,
+	PBM_MP_REASON_IPV4_TCP = 10,
+	PBM_MP_REASON_IPV6_UDP = 11,
+	PBM_MP_REASON_IPV6_TCP = 12,
+	PBM_MP_REASON_UNKNOWN = 255,
+};
+#endif
+
 /*
  * memory chunck allocated by Host to be managed by FW
  * used only for low latency interfaces like pcie
@@ -955,6 +976,10 @@ typedef struct wma_handle {
 	uint16_t max_mgmt_tx_fail_count;
 	uint32_t ccmp_replays_attack_cnt;
 
+#ifdef FEATURE_PBM_MAGIC_WOW
+	bool is_parsed_reason_set;
+	enum pbm_mp_reason wow_parsed_reason;
+#endif
 	struct wma_runtime_pm_context runtime_context;
 	uint32_t fine_time_measurement_cap;
 	bool bpf_enabled;
@@ -1338,9 +1363,11 @@ VOS_STATUS wma_update_vdev_tbl(tp_wma_handle wma_handle, u_int8_t vdev_id,
 		ol_txrx_vdev_handle tx_rx_vdev_handle, u_int8_t *mac,
 		u_int32_t vdev_type, bool add_del);
 
-int32_t regdmn_get_regdmn_for_country(u_int8_t *alpha2);
+uint16 regdmn_get_regdmn_for_country(const u_int8_t *alpha2);
 void regdmn_get_ctl_info(struct regulatory *reg, u_int32_t modesAvail,
 			 u_int32_t modeSelect);
+void regdmn_map_country_to_vos_regdmn(const unsigned char *alpha2,
+				      v_REGDOMAIN_t *vos_regdmn);
 
 /*get the ctl from regdomain*/
 u_int8_t regdmn_get_ctl_for_regdmn(u_int32_t reg_dmn);
@@ -1850,6 +1877,17 @@ bool wma_is_vdev_up(uint8_t vdev_id);
 int wma_btc_set_bt_wlan_interval(tp_wma_handle wma_handle,
 			WMI_COEX_CONFIG_CMD_fixed_param *interval);
 
+/**
+ * wma_ps_set_tx_duty_cycle_control() - API to set tx duty cycle control param
+ * @wma_handle: wma handle
+ * @enable: tdcc enable or disable
+ * @tx_cycle_percentage: percentage of tx duty cycle
+ *
+ * Return: error code if fail, 0 if success
+ */
+int wma_ps_set_tx_duty_cycle_control(tp_wma_handle wma_handle,
+				     uint32_t enable,
+				     uint32_t tx_cycle_percentage);
 
 int wma_crash_inject(tp_wma_handle wma_handle, uint32_t type,
 			uint32_t delay_time_ms);
@@ -1951,6 +1989,17 @@ VOS_STATUS wma_create_peer(tp_wma_handle wma, ol_txrx_pdev_handle pdev,
 			   v_BOOL_t roam_synch_in_progress);
 WLAN_PHY_MODE wma_chan_to_mode(uint8_t chan, ePhyChanBondState chan_offset,
 		uint8_t vht_capable, uint8_t dot11_mode);
+
+/**
+ * wma_cal_finish_handler()
+ * @handle: WMI handle
+ * @event: event data
+ * @len: Length of @event
+ *
+ * This is the WMI event handler function to receive cali
+ * finish event.
+ */
+int wma_cal_finish_handler(void *handle, u_int8_t *event, u_int32_t len);
 
 #define RESET_BEACON_INTERVAL_TIMEOUT 200
 struct wma_beacon_interval_reset_req {

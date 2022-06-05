@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2014, 2016, 2018 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2011-2014, 2016, 2018-2019 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -323,7 +323,7 @@ static eHalStatus sme_EseSendBeaconReqScanResults(tpAniSirGlobal pMac,
    tCsrScanResultInfo     *pCurResult     = NULL;
    tANI_U8                 msgCounter     = 0;
    tpRrmSMEContext         pSmeRrmContext = &pMac->rrm.rrmSmeContext;
-   tCsrRoamInfo            roamInfo;
+   tCsrRoamInfo            *roam_info;
    tSirEseBcnReportRsp     bcnReport;
    tpSirEseBcnReportRsp    pBcnReport     = &bcnReport;
    tpCsrEseBeaconReqParams pCurMeasReqIe  = NULL;
@@ -341,6 +341,9 @@ static eHalStatus sme_EseSendBeaconReqScanResults(tpAniSirGlobal pMac,
       return eHAL_STATUS_FAILURE;
    }
 
+   roam_info = vos_mem_malloc(sizeof(*roam_info));
+   if (!roam_info)
+      return eHAL_STATUS_FAILED_ALLOC;
    if (pResultArr)
        pCurResult=pResultArr[bssCounter];
 
@@ -430,8 +433,8 @@ static eHalStatus sme_EseSendBeaconReqScanResults(tpAniSirGlobal pMac,
                " msgCounter(%d) bssCounter(%d) flag(%d)",
                 pBcnReport->numBss, msgCounter, bssCounter, pBcnReport->flag);
 
-       roamInfo.pEseBcnReportRsp = pBcnReport;
-       status = csrRoamCallCallback(pMac, sessionId, &roamInfo,
+       roam_info->pEseBcnReportRsp = pBcnReport;
+       status = csrRoamCallCallback(pMac, sessionId, roam_info,
                            0, eCSR_ROAM_ESE_BCN_REPORT_IND, 0);
 
        /* Free the memory allocated to IE */
@@ -441,6 +444,8 @@ static eHalStatus sme_EseSendBeaconReqScanResults(tpAniSirGlobal pMac,
                vos_mem_free(pBcnReport->bcnRepBssInfo[i].pBuf);
        }
    } while (pCurResult);
+   vos_mem_free(roam_info);
+
    return status;
 }
 
@@ -615,7 +620,7 @@ static eHalStatus sme_RrmSendScanResult( tpAniSirGlobal pMac,
       if (scan_type == eSIR_PASSIVE_SCAN) {
           session = CSR_GET_SESSION(pMac, sessionId);
          if (csrIsConnStateConnectedInfra(pMac, sessionId) &&
-             (NULL != session->pConnectBssDesc) &&
+	     (session) && (NULL != session->pConnectBssDesc) &&
              (csrIsDuplicateBssDescription(pMac, &pScanResult->BssDescriptor,
              session->pConnectBssDesc, NULL, FALSE))) {
              is_conn_bss_found = true;
@@ -769,7 +774,12 @@ eHalStatus sme_RrmIssueScanReq( tpAniSirGlobal pMac )
    }
 
    if ((pSmeRrmContext->currentIndex) >= pSmeRrmContext->channelList.numOfChannels)
+   {
+       sme_RrmSendBeaconReportXmitInd(pMac, NULL, true, 0);
+       vos_mem_free( pSmeRrmContext->channelList.ChannelList );
+       smsLog( pMac, LOGE, "%s : done with the complete ch lt. finish and fee now", __func__);
        return status;
+   }
 
    if( eRRM_MSG_SOURCE_ESE_UPLOAD == pSmeRrmContext->msgSource ||
        eRRM_MSG_SOURCE_LEGACY_ESE == pSmeRrmContext->msgSource )
@@ -903,6 +913,7 @@ eHalStatus sme_RrmIssueScanReq( tpAniSirGlobal pMac )
                 /* If this is not done, pCurrentReq pointer will not be freed and
                    PE will not handle subsequent Beacon requests */
         sme_RrmSendBeaconReportXmitInd(pMac, NULL, true, 0);
+        vos_mem_free( pSmeRrmContext->channelList.ChannelList );
    }
 
    return status;
@@ -931,6 +942,12 @@ eHalStatus sme_RrmProcessBeaconReportReqInd(tpAniSirGlobal pMac, void *pMsgBuf)
 #if defined WLAN_VOWIFI_DEBUG
    smsLog( pMac, LOGE, "Received Beacon report request ind Channel = %d", pBeaconReq->channelInfo.channelNum );
 #endif
+
+   if (pBeaconReq->channelList.numChannels > SIR_ESE_MAX_MEAS_IE_REQS) {
+         smsLog( pMac, LOGP, "Beacon report request numChannels: %u exceeds "
+                "max num channels", pBeaconReq->channelList.numChannels);
+         return eHAL_STATUS_FAILURE;
+   }
    //section 11.10.8.1 (IEEE Std 802.11k-2008)
    //channel 0 and 255 has special meaning.
    if( (pBeaconReq->channelInfo.channelNum == 0)  ||
@@ -948,7 +965,9 @@ eHalStatus sme_RrmProcessBeaconReportReqInd(tpAniSirGlobal pMac, void *pMsgBuf)
       smsLog( pMac, LOGE, FL("Allocated memory for ChannelList") );
 #endif
       csrGetCfgValidChannels( pMac, pSmeRrmContext->channelList.ChannelList, &len );
-
+      /* Listing all the channels in the requested RC */
+      regdm_get_channel_from_opclass(pMac->scan.countryCodeCurrent,
+                                     pBeaconReq->channelInfo.regulatoryClass);
       for (i = 0 ; i <len; i++)
       {
           if (regdm_get_opclass_from_channel(pMac->scan.countryCodeCurrent,
@@ -1269,20 +1288,11 @@ eHalStatus sme_RrmProcessNeighborReport(tpAniSirGlobal pMac, void *pMsgBuf)
    tpRrmNeighborReportDesc  pNeighborReportDesc;
    tANI_U8 i = 0;
    VOS_STATUS vosStatus = VOS_STATUS_SUCCESS;
-   tANI_U32 sessionId;
 
-   /* Get the session id */
-   status = csrRoamGetSessionIdFromBSSID(pMac, (tCsrBssid *)pNeighborRpt->bssId,
-                                         &sessionId);
-   if (HAL_STATUS_SUCCESS(status)) {
-#ifdef FEATURE_WLAN_ESE
-       /* Clear the cache for ESE. */
-       if (csrNeighborRoamIsESEAssoc(pMac, sessionId)) {
-           rrmLLPurgeNeighborCache(pMac,
-           &pMac->rrm.rrmSmeContext.neighborReportCache);
-       }
-#endif
-   }
+   /* Purge the cache on reception of unsolicited neighbor report */
+   if (!pMac->rrm.rrmSmeContext.neighborReqControlInfo.isNeighborRspPending)
+       rrmLLPurgeNeighborCache(pMac,
+                               &pMac->rrm.rrmSmeContext.neighborReportCache);
 
    for (i = 0; i < pNeighborRpt->numNeighborReports; i++)
    {

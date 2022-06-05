@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2011-2019 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -204,12 +204,21 @@ htt_rx_ring_fill_level(struct htt_pdev_t *pdev)
     return size;
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 15, 0)
+static void
+htt_rx_ring_refill_retry(struct timer_list *t)
+{
+	htt_pdev_handle pdev = from_timer(pdev, t, rx_ring.refill_retry_timer);
+	htt_rx_msdu_buff_replenish(pdev);
+}
+#else
 static void
 htt_rx_ring_refill_retry(void *arg)
 {
     htt_pdev_handle pdev = (htt_pdev_handle)arg;
     htt_rx_msdu_buff_replenish(pdev);
 }
+#endif
 
 void
 htt_rx_ring_fill_n(struct htt_pdev_t *pdev, int num)
@@ -2036,6 +2045,15 @@ htt_rx_mac_header_mon_process(
 	if (num_elems <= 0)
 		return 0;
 
+	if (num_elems > ((adf_nbuf_len(rx_ind_msg)
+		- HTT_T2H_MONITOR_MAC_HEADER_IND_HDR_SIZE
+		- sizeof(struct htt_hw_rx_desc_base))
+		/ sizeof(struct ieee80211_frame_addr4))) {
+		adf_os_print("%s: num_elems %d exceed range of nbuf \n",
+				     __func__, num_elems);
+		return 0;
+	}
+
 	/* get htt_hw_rx_desc_base_rx_desc pointer */
 	hw_desc = (struct htt_hw_rx_desc_base *)
 			(rx_ind_data + HTT_T2H_MONITOR_MAC_HEADER_IND_HDR_SIZE);
@@ -3345,7 +3363,10 @@ htt_rx_hash_list_lookup(struct htt_pdev_t *pdev, u_int32_t paddr)
     if (netbuf == NULL) {
         adf_os_print("rx hash: %s: no entry found for 0x%x!!!\n",
                      __FUNCTION__, paddr);
-        HTT_ASSERT_ALWAYS(0);
+        if (vos_is_self_recovery_enabled())
+                vos_trigger_recovery(false);
+        else
+                HTT_ASSERT_ALWAYS(0);
     }
 
     return netbuf;

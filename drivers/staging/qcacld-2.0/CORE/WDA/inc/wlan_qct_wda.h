@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2018 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2019 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -638,7 +638,6 @@ tSirRetStatus uMacPostCtrlMsg(void* pSirGlobal, tSirMbMsg* pMb);
 #define WDA_UPDATE_STARATEINFO_RSP     SIR_HAL_UPDATE_STARATEINFO_RSP
 
 #define WDA_UPDATE_BEACON_IND          SIR_HAL_UPDATE_BEACON_IND
-#define WDA_UPDATE_CF_IND              SIR_HAL_UPDATE_CF_IND
 #define WDA_CHNL_SWITCH_REQ            SIR_HAL_CHNL_SWITCH_REQ
 #define WDA_ADD_TS_REQ                 SIR_HAL_ADD_TS_REQ
 #define WDA_DEL_TS_REQ                 SIR_HAL_DEL_TS_REQ
@@ -1008,6 +1007,7 @@ tSirRetStatus uMacPostCtrlMsg(void* pSirGlobal, tSirMbMsg* pMb);
 #define WDA_LINK_LAYER_STATS_GET_REQ          SIR_HAL_LL_STATS_GET_REQ
 #define WDA_LINK_LAYER_STATS_RESULTS_RSP      SIR_HAL_LL_STATS_RESULTS_RSP
 #define WDA_LINK_LAYER_STATS_SET_THRESHOLD    SIR_HAL_LL_STATS_EXT_SET_THRESHOLD
+#define WDA_LINK_LAYER_STATS_SET_PRIMARY_PEER SIR_HAL_SET_LL_STAT_PRIMARY_PEER
 #endif /* WLAN_FEATURE_LINK_LAYER_STATS */
 
 #define WDA_LINK_STATUS_GET_REQ SIR_HAL_LINK_STATUS_GET_REQ
@@ -1117,6 +1117,19 @@ tSirRetStatus uMacPostCtrlMsg(void* pSirGlobal, tSirMbMsg* pMb);
 #define WDA_SET_MOTION_DET_BASE_LINE_ENABLE   SIR_HAL_SET_MOTION_DET_BASE_LINE_ENABLE
 #endif
 
+#define WDA_SET_HPCS_PULSE_PARAMS             SIR_HAL_SET_HPCS_PULSE_PARMAS
+
+#define WDA_SET_RX_ANTENNA                    SIR_HAL_SET_RX_SMART_ANTENNA
+#define WDA_SET_GPIO_CFG                      SIR_HAL_SET_GPIO_CFG
+#define WDA_SET_GPIO_OUTPUT                   SIR_HAL_SET_GPIO_OUTPUT
+
+#ifdef AUDIO_MULTICAST_AGGR_SUPPORT
+#define WDA_ADD_MULTICAST_GROUP              SIR_HAL_ADD_MULTICAST_GROUP
+#define WDA_SET_MULTICAST_RATE              SIR_HAL_SET_MULTICAST_RATE
+#endif
+
+#define WDA_SPECTRAL_SCAN_ENABLE_CMDID        SIR_HAL_SPECTRAL_SCAN_ENABLE_CMDID
+#define WDA_SPECTRAL_SCAN_CONFIG_CMDID        SIR_HAL_SPECTRAL_SCAN_CONFIG_CMDID
 tSirRetStatus wdaPostCtrlMsg(tpAniSirGlobal pMac, tSirMsgQ *pMsg);
 
 #define HAL_USE_BD_RATE2_FOR_MANAGEMENT_FRAME 0x40 // Bit 6 will be used to control BD rate for Management frames

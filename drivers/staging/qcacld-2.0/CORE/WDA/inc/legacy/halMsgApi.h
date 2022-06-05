@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2011-2019 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -960,24 +960,6 @@ typedef struct
 
 #endif
 
-//HAL MSG: SIR_HAL_UPDATE_CF_IND
-typedef struct
-{
-
-    tANI_U8  bssIdx;
-
-    /*
-    * cfpCount indicates how many DTIMs (including the current frame) appear before the next CFP start.
-    * A CFPCount of 0 indicates that the current DTIM marks the start of the CFP.
-    */
-    tANI_U8  cfpCount;
-
-    /* cfpPeriod indicates the number of DTIM intervals between the start of CFPs. */
-    tANI_U8 cfpPeriod;
-
-}tUpdateCFParams, *tpUpdateCFParams;
-
-
 
 //HAL MSG: SIR_HAL_UPDATE_DTIM_IND
 //This message not required, as Softmac is supposed to read these values from the beacon.
@@ -1025,6 +1007,8 @@ typedef struct
      * by way of ignoring if using new host/old FW or old host/new FW since it is at the end of this struct
      */
     tSirMacAddr bssId;
+    uint8_t ssidHidden;
+    tSirMacSSid ssid;
 
     eHalStatus status;
 
@@ -1322,6 +1306,7 @@ typedef struct sAddStaSelfParams
    uint32_t tx_non_aggr_sw_retry_threshhold_bk;
    uint32_t tx_non_aggr_sw_retry_threshhold_vi;
    uint32_t tx_non_aggr_sw_retry_threshhold_vo;
+   bool            enable_bcast_probe_rsp;
 }tAddStaSelfParams, *tpAddStaSelfParams;
 
 /**
@@ -1570,5 +1555,91 @@ struct hal_thermal_mitigation_params
     tANI_U32 dc_per_event;
     hal_tt_level_config level_conf[WLAN_WMA_MAX_THERMAL_LEVELS];
 };
+
+struct hal_hpcs_pulse_params
+{
+    tANI_U32 vdev_id;
+    tANI_U32 start;
+    tANI_U32 sync_time;
+    tANI_U32 pulse_interval;
+    tANI_U32 active_sync_period;
+    tANI_U32 gpio_pin;
+    tANI_U32 pulse_width;
+};
+
+/**
+ * strcut hal_primary_params - Set primary peer
+ * @vdev_id: Vdev ID
+ * @bssid: MAC address for the primary peer
+ */
+struct hal_primary_params {
+	uint8_t session_id;
+	tSirMacAddr bssid;
+};
+
+/**
+ * struct hal_gpio_cfg - GPIO config paramters
+ * @gpio_num: GPIO number to be setup
+ * @input: 0 - Output/ 1 - Input
+ * @pull_type: Pull type
+ * @intr_mode: Interrupt mode
+ * @mux_config_val: mux_config_val
+ */
+struct hal_gpio_cfg {
+	uint32_t gpio_num;
+	uint32_t input;
+	uint32_t pull_type;
+	uint32_t intr_mode;
+	uint32_t mux_config_val;
+};
+
+/**
+ * struct hal_gpio_output - GPIO output parameters
+ * @gpio_num: GPIO number to be setup
+ * @set:  Set the GPIO pin
+ */
+struct hal_gpio_output {
+	uint32_t gpio_num;
+	uint32_t set;
+};
+
+#ifdef AUDIO_MULTICAST_AGGR_SUPPORT
+#define MAX_GROUP_NUM        5
+#define MAX_CLIENT_NUM       10
+#define MAX_NUM_RATE_SET     4
+#define MAX_RETRY_LIMIT      MAX_NUM_RATE_SET-1
+
+struct audio_multicast_rate
+{
+    uint32_t mcs;
+    uint32_t bandwith;
+};
+
+/** 2 word representation of MAC addr */
+struct mac_addr_s {
+    uint32_t mac_addr31to0;
+    uint32_t mac_addr47to32;
+};
+
+struct audio_multicast_group
+{
+    uint8_t group_id;
+    uint8_t in_use;
+    uint32_t client_num;
+    uint32_t retry_limit;
+    uint32_t num_rate_set;
+    struct audio_multicast_rate rate_set[MAX_NUM_RATE_SET];
+    struct mac_addr_s multicast_addr;
+    struct mac_addr_s client_addr[MAX_CLIENT_NUM];
+};
+
+struct audio_multicast_aggr
+{
+    uint32_t aggr_enable;
+    uint32_t tbd_enable;
+    uint8_t group_num;
+    struct audio_multicast_group multicast_group[MAX_GROUP_NUM];
+};
+#endif
 
 #endif /* _HALMSGAPI_H_ */

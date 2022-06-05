@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2018 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2013-2019 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -235,7 +235,7 @@ hif_pci_interrupt_handler(int irq, void *arg)
 {
     struct hif_pci_softc *sc = (struct hif_pci_softc *) arg;
     struct HIF_CE_state *hif_state = (struct HIF_CE_state *)sc->hif_device;
-    volatile int tmp;
+    volatile unsigned int tmp;
 
     if (sc->hif_init_done == TRUE) {
         adf_os_spin_lock_irqsave(&hif_state->suspend_lock);
@@ -943,9 +943,9 @@ static int hif_pci_autopm_debugfs_show(struct seq_file *s, void *data)
 				msecs_age / 1000, msecs_age % 1000);
 	}
 
-	spin_lock_bh(&sc->runtime_lock);
+	adf_os_spin_lock_bh(&sc->runtime_lock);
 	if (list_empty(&sc->prevent_suspend_list)) {
-		spin_unlock_bh(&sc->runtime_lock);
+		adf_os_spin_unlock_bh(&sc->runtime_lock);
 		return 0;
 	}
 
@@ -957,7 +957,7 @@ static int hif_pci_autopm_debugfs_show(struct seq_file *s, void *data)
 		seq_puts(s, " ");
 	}
 	seq_puts(s, "\n");
-	spin_unlock_bh(&sc->runtime_lock);
+	adf_os_spin_unlock_bh(&sc->runtime_lock);
 
 	return 0;
 #undef HIF_PCI_AUTOPM_STATS
@@ -1431,7 +1431,7 @@ static inline void hif_pci_pm_debugfs(struct hif_pci_softc *sc, bool init)
 
 static void hif_pci_pm_runtime_pre_init(struct hif_pci_softc *sc)
 {
-	spin_lock_init(&sc->runtime_lock);
+	adf_os_spinlock_init(&sc->runtime_lock);
 	setup_timer(&sc->runtime_timer, hif_pci_runtime_pm_timeout_fn,
 			(unsigned long)sc);
 
@@ -1514,13 +1514,13 @@ static void hif_pci_pm_runtime_post_exit(struct hif_pci_softc *sc)
 	else
 		return;
 
-	spin_lock_bh(&sc->runtime_lock);
+	adf_os_spin_lock_bh(&sc->runtime_lock);
 	list_for_each_entry_safe(ctx, tmp, &sc->prevent_suspend_list, list) {
-		spin_unlock_bh(&sc->runtime_lock);
+		adf_os_spin_unlock_bh(&sc->runtime_lock);
 		hif_runtime_pm_prevent_suspend_deinit(ctx);
-		spin_lock_bh(&sc->runtime_lock);
+		adf_os_spin_lock_bh(&sc->runtime_lock);
 	}
-	spin_unlock_bh(&sc->runtime_lock);
+	adf_os_spin_unlock_bh(&sc->runtime_lock);
 	/*
 	 * This is totally a preventive measure to ensure Runtime PM
 	 * isn't disabled for life time.
@@ -1549,11 +1549,11 @@ static void hif_pci_pm_runtime_ssr_post_exit(struct hif_pci_softc *sc)
 {
 	struct hif_pm_runtime_context *ctx, *tmp;
 
-	spin_lock_bh(&sc->runtime_lock);
+	adf_os_spin_lock_bh(&sc->runtime_lock);
 	list_for_each_entry_safe(ctx, tmp, &sc->prevent_suspend_list, list) {
 		hif_pm_ssr_runtime_allow_suspend(sc, ctx);
 	}
-	spin_unlock_bh(&sc->runtime_lock);
+	adf_os_spin_unlock_bh(&sc->runtime_lock);
 }
 
 #else
@@ -1937,7 +1937,7 @@ err_region:
  * power up WLAN host driver when SSR happens. Most of this
  * function is duplicated from hif_pci_probe().
  */
-#ifdef HIF_PCI
+#ifdef CONFIG_CNSS
 int hif_pci_reinit(struct pci_dev *pdev, const struct pci_device_id *id)
 {
     void __iomem *mem;
@@ -2286,7 +2286,6 @@ err_region:
 
     return ret;
 }
-#endif
 
 void hif_pci_notify_handler(struct pci_dev *pdev, int state)
 {
@@ -2297,6 +2296,7 @@ void hif_pci_notify_handler(struct pci_dev *pdev, int state)
           printk(KERN_ERR "%s: Fail to send notify\n", __func__);
    }
 }
+#endif
 
 void
 hif_nointrs(struct hif_pci_softc *sc)
@@ -2621,7 +2621,7 @@ hif_pci_remove(struct pci_dev *pdev)
     printk(KERN_INFO "pci_remove\n");
 }
 
-#ifdef HIF_PCI
+#ifdef CONFIG_CNSS
 static void hif_pci_ssr_fail_ind(void)
 {
 	v_CONTEXT_t vos_ctx;
@@ -2738,8 +2738,7 @@ static bool is_hif_runtime_active(struct hif_pci_softc *sc)
 {
 	int pm_state = adf_os_atomic_read(&sc->pm_state);
 
-	if (pm_state  == HIF_PM_RUNTIME_STATE_ON ||
-	    pm_state == HIF_PM_RUNTIME_STATE_NONE)
+	if (pm_state != HIF_PM_RUNTIME_STATE_SUSPENDED)
 		return true;
 
 	return false;
@@ -2783,7 +2782,7 @@ static void hif_dump_crash_debug_info(struct hif_pci_softc *sc)
 {
 	struct HIF_CE_state *hif_state = (struct HIF_CE_state *)sc->hif_device;
 	struct ol_softc *scn = sc->ol_sc;
-	int ret;
+	int ret = 0;
 	tp_wma_handle wma_handle;
 	void *vos_context = vos_get_global_context(VOS_MODULE_ID_HIF, NULL);
 
@@ -2810,7 +2809,8 @@ static void hif_dump_crash_debug_info(struct hif_pci_softc *sc)
 	 * time, TargetFailure event wont't be received after inject
 	 * crash due to the same reason
 	 */
-	ret = wma_crash_inject(wma_handle, 1, 0);
+	if (wmi_get_host_credits(wma_handle->wmi_handle))
+		ret = wma_crash_inject(wma_handle, 1, 0);
 
 	adf_os_spin_lock_irqsave(&hif_state->suspend_lock);
 	hif_irq_record(HIF_CRASH, sc);
@@ -2918,17 +2918,43 @@ static void hif_enable_tasklet_noclient(struct hif_pci_softc *sc, void *wma_hdl)
 static int
 __hif_pci_suspend(struct pci_dev *pdev, pm_message_t state, bool runtime_pm)
 {
-    struct hif_pci_softc *sc = pci_get_drvdata(pdev);
-    void *vos = vos_get_global_context(VOS_MODULE_ID_HIF, NULL);
-    ol_txrx_pdev_handle txrx_pdev = vos_get_context(VOS_MODULE_ID_TXRX, vos);
-    struct HIF_CE_state *hif_state = (struct HIF_CE_state *)sc->hif_device;
-    A_target_id_t targid = hif_state->targid;
+    struct hif_pci_softc *sc;
+    void *vos;
+    ol_txrx_pdev_handle txrx_pdev;
+    struct HIF_CE_state *hif_state;
+    A_target_id_t targid;
     u32 tx_drain_wait_cnt = 0;
     u32 val;
     u32 ce_drain_wait_cnt = 0;
     v_VOID_t * temp_module;
     u32 tmp;
     int ret = -EBUSY;
+
+    sc = pci_get_drvdata(pdev);
+    if (!sc) {
+       printk("%s: sc is NULL\n", __func__);
+       goto out;
+    }
+
+    hif_state = (struct HIF_CE_state *)sc->hif_device;
+    if (!hif_state){
+       printk("%s: hif_state is NULL\n", __func__);
+       goto out;
+    }
+
+    targid = hif_state->targid;
+
+    vos = vos_get_global_context(VOS_MODULE_ID_HIF, NULL);
+    if (!vos) {
+       printk("%s: vos is NULL\n", __func__);
+       goto out;
+    }
+
+    txrx_pdev = vos_get_context(VOS_MODULE_ID_TXRX, vos);
+    if (!txrx_pdev) {
+        printk("%s: txrx_pdev is NULL\n", __func__);
+        goto out;
+    }
 
     hif_irq_record(HIF_SUSPEND_START, sc);
 
@@ -2938,10 +2964,6 @@ __hif_pci_suspend(struct pci_dev *pdev, pm_message_t state, bool runtime_pm)
     if (vos_is_load_unload_in_progress(VOS_MODULE_ID_HIF, NULL))
         return ret;
 
-    if (!txrx_pdev) {
-        printk("%s: txrx_pdev is NULL\n", __func__);
-        goto out;
-    }
     /* Wait for pending tx completion */
     while (ol_txrx_get_tx_pending(txrx_pdev) ||
            ol_txrx_get_queue_status(txrx_pdev)) {
@@ -3205,10 +3227,8 @@ __hif_pci_resume(struct pci_dev *pdev, bool runtime_pm)
     pci_set_master(pdev);
 
 skip:
-#ifdef HIF_PCI
     /* Keep PCIe bus driver's shadow memory intact */
     vos_pcie_shadow_control(pdev, TRUE);
-#endif
 
 #ifdef DISABLE_L1SS_STATES
     pci_read_config_dword(pdev, 0x188, &val);
@@ -3406,6 +3426,13 @@ void hif_pci_save_htc_htt_config_endpoint(int htc_endpoint)
     }
 
     scn->hif_sc->htc_endpoint = htc_endpoint;
+}
+
+void hif_get_reg(void *ol_sc, u32 address, u32 *data)
+{
+	struct ol_softc *scn = (struct ol_softc *)ol_sc;
+
+	HIFDiagReadAccess(scn->hif_hdl, address, data);
 }
 
 void hif_get_hw_info(void *ol_sc, u32 *version, u32 *revision)

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2011-2019 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -1986,6 +1986,19 @@ struct cgstatic cfg_static[WNI_CFG_MAX] = {
 	 WNI_CFG_REMOVE_TIME_SYNC_CMD_STAMIN,
 	 WNI_CFG_REMOVE_TIME_SYNC_CMD_STAMAX,
 	 WNI_CFG_REMOVE_TIME_SYNC_CMD_STADEF},
+
+	{WNI_CFG_MASK_TX_LEGACY_RATE,
+	 CFG_CTL_VALID | CFG_CTL_RE | CFG_CTL_WE | CFG_CTL_INT,
+	 WNI_CFG_MASK_LEGACY_RATE_STAMIN,
+	 WNI_CFG_MASK_LEGACY_RATE_STAMAX,
+	 WNI_CFG_MASK_LEGACY_RATE_STADEF},
+
+	{WNI_CFG_MASK_TX_HT_RATE,
+	 CFG_CTL_VALID | CFG_CTL_RE | CFG_CTL_WE | CFG_CTL_INT,
+	 WNI_CFG_MASK_HT_RATE_STAMIN,
+	 WNI_CFG_MASK_HT_RATE_STAMAX,
+	 WNI_CFG_MASK_HT_RATE_STADEF},
+
 };
 
 struct cfgstatic_string cfg_static_string[CFG_MAX_STATIC_STRING] = {
@@ -2485,6 +2498,14 @@ ProcDnldRsp(tpAniSirGlobal pMac, tANI_U16 length, tANI_U32 *pParam)
     PELOGW(cfgLog(pMac, LOGW, FL("CFG hdr totParams %d intParams %d strBufSize %d/%d"),
            pHdr->controlSize, pHdr->iBufSize, pHdr->sBufSize, pMac->cfg.gCfgMaxSBufSize);)
 
+    if (pHdr->sBufSize > (UINT_MAX -
+        (((WNI_CFG_MAX + 3 * pMac->cfg.gCfgMaxIBufSize) << 2) +
+        sizeof(tCfgBinHdr)))) {
+           PELOGW(cfgLog(pMac, LOGW, FL("Invalid sBufSize coming from fw %d"),
+                  pHdr->sBufSize);)
+           retVal = WNI_CFG_INVALID_LEN;
+           goto end;
+    }
     expLen = ((WNI_CFG_MAX + 3 * pMac->cfg.gCfgMaxIBufSize) << 2) +
              pHdr->sBufSize + sizeof(tCfgBinHdr);
 

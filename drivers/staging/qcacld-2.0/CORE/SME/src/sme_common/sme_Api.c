@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2018 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2020 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -77,6 +77,8 @@
 #include "sme_nan_datapath.h"
 #include "csrApi.h"
 #include "utilsApi.h"
+#include "cfgApi.h"
+#include "limUtils.h"
 
 extern tSirRetStatus uMacPostCtrlMsg(void* pSirGlobal, tSirMbMsg* pMb);
 
@@ -1693,37 +1695,36 @@ eHalStatus sme_SetPlmRequest(tHalHandle hHal, tpSirPlmReq pPlmReq)
         }
 
         if (pPlmReq->enable) {
-
            /* validating channel numbers */
-           for (count = 0; count < pPlmReq->plmNumCh; count++) {
-
-              ret = csrIsSupportedChannel(pMac, pPlmReq->plmChList[count]);
-              if (ret && pPlmReq->plmChList[count] > 14)
-              {
-                  if (NV_CHANNEL_DFS ==
-                       vos_nv_getChannelEnabledState(pPlmReq->plmChList[count]))
+           if(pPlmReq->plmNumCh < WNI_CFG_VALID_CHANNEL_LIST_LEN) {
+               for (count = 0; count < pPlmReq->plmNumCh; count++) {
+                  ret = csrIsSupportedChannel(pMac, pPlmReq->plmChList[count]);
+                  if (ret && pPlmReq->plmChList[count] > 14)
                   {
-                      /* DFS channel is provided, no PLM bursts can be
-                      * transmitted. Ignoring these channels.
-                      */
-                      VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_INFO,
-                                "%s DFS channel %d ignored for PLM", __func__,
-                                pPlmReq->plmChList[count]);
-                      continue;
+                      if (NV_CHANNEL_DFS ==
+                           vos_nv_getChannelEnabledState(pPlmReq->plmChList[count]))
+                      {
+                          /* DFS channel is provided, no PLM bursts can be
+                          * transmitted. Ignoring these channels.
+                          */
+                          VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_INFO,
+                                    "%s DFS channel %d ignored for PLM", __func__,
+                                    pPlmReq->plmChList[count]);
+                          continue;
+                      }
                   }
-              }
-              else if (!ret)
-              {
-                   /* Not supported, ignore the channel */
-                   VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_INFO,
-                             "%s Unsupported channel %d ignored for PLM",
-                             __func__, pPlmReq->plmChList[count]);
-                   continue;
-              }
-              ch_list[valid_count] = pPlmReq->plmChList[count];
-              valid_count++;
-           } /* End of for () */
-
+                  else if (!ret)
+                  {
+                       /* Not supported, ignore the channel */
+                       VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_INFO,
+                                 "%s Unsupported channel %d ignored for PLM",
+                                 __func__, pPlmReq->plmChList[count]);
+                       continue;
+                  }
+                  ch_list[valid_count] = pPlmReq->plmChList[count];
+                  valid_count++;
+               } /* End of for () */
+           }
            /* Copying back the valid channel list to plm struct */
            vos_mem_set((void *)pPlmReq->plmChList, pPlmReq->plmNumCh, 0);
            if (valid_count)
@@ -1897,6 +1898,9 @@ eHalStatus sme_UpdateConfig(tHalHandle hHal, tpSmeConfigParams pSmeConfigParams)
 
    pMac->sta_change_cc_via_beacon =
          pSmeConfigParams->sta_change_cc_via_beacon;
+
+   pMac->mcs_tx_force2chain =
+         pSmeConfigParams->mcs_tx_force2chain;
 
    return status;
 }
@@ -2336,6 +2340,35 @@ eHalStatus sme_handle_cc_change_ind(tHalHandle hal_ptr, void *msg_buf)
 	return (status);
 }
 
+eHalStatus sme_handle_update_pwr_ind(tHalHandle hal_ptr, uint32_t pesession_id)
+{
+	tpAniSirGlobal mac_ptr = PMAC_STRUCT(hal_ptr);
+	tpPESession pesession_ptr =
+		peFindSessionBySessionId(mac_ptr, pesession_id);
+	tPowerdBm regMax = 0,maxTxPower = 0;
+
+	if (pesession_ptr == NULL)
+		return eHAL_STATUS_FAILURE;
+
+	regMax =
+	  cfgGetRegulatoryMaxTransmitPower(mac_ptr,
+					   pesession_ptr->currentOperChannel);
+	maxTxPower = VOS_MIN(regMax, mac_ptr->roam.configParam.nTxPowerCap);
+	VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_INFO,
+		  "updating new maxTx power %d to HAL from old pwr %d",
+		  maxTxPower, pesession_ptr->maxTxPower);
+	if(limSendSetMaxTxPowerReq(mac_ptr,
+				   maxTxPower,
+				   pesession_ptr) == eSIR_SUCCESS)
+		pesession_ptr->maxTxPower = maxTxPower;
+	else {
+		VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_ERROR,
+			  "Set max txpwr req fail");
+	}
+
+	return eHAL_STATUS_SUCCESS;
+}
+
 /*--------------------------------------------------------------------------
 
   \brief sme_Start() - Put all SME modules at ready state.
@@ -2454,19 +2487,24 @@ eHalStatus sme_PCFilterMatchCountResponseHandler(tHalHandle hHal, void* pMsg)
 eHalStatus sme_UnprotectedMgmtFrmInd( tHalHandle hHal,
                                       tpSirSmeUnprotMgmtFrameInd pSmeMgmtFrm)
 {
-    tpAniSirGlobal pMac = PMAC_STRUCT( hHal );
-    eHalStatus  status = eHAL_STATUS_SUCCESS;
-    tCsrRoamInfo pRoamInfo = {0};
-    tANI_U32 SessionId = pSmeMgmtFrm->sessionId;
+	tpAniSirGlobal pMac = PMAC_STRUCT( hHal );
+	eHalStatus  status = eHAL_STATUS_SUCCESS;
+	tCsrRoamInfo *roam_info;
+	tANI_U32 SessionId = pSmeMgmtFrm->sessionId;
 
-    pRoamInfo.nFrameLength = pSmeMgmtFrm->frameLen;
-    pRoamInfo.pbFrames = pSmeMgmtFrm->frameBuf;
-    pRoamInfo.frameType = pSmeMgmtFrm->frameType;
+	roam_info = vos_mem_malloc(sizeof(*roam_info));
+	if (!roam_info)
+		return eHAL_STATUS_FAILED_ALLOC;
+	roam_info->nFrameLength = pSmeMgmtFrm->frameLen;
+	roam_info->pbFrames = pSmeMgmtFrm->frameBuf;
+	roam_info->frameType = pSmeMgmtFrm->frameType;
 
-    /* forward the mgmt frame to HDD */
-    csrRoamCallCallback(pMac, SessionId, &pRoamInfo, 0, eCSR_ROAM_UNPROT_MGMT_FRAME_IND, 0);
+	/* forward the mgmt frame to HDD */
+	csrRoamCallCallback(pMac, SessionId, roam_info, 0,
+			    eCSR_ROAM_UNPROT_MGMT_FRAME_IND, 0);
+	vos_mem_free(roam_info);
 
-    return status;
+	return status;
 }
 #endif
 
@@ -2478,13 +2516,17 @@ eHalStatus sme_UnprotectedMgmtFrmInd( tHalHandle hHal,
 eHalStatus dfsMsgProcessor(tpAniSirGlobal pMac, v_U16_t msgType, void *pMsgBuf)
 {
     eHalStatus status = eHAL_STATUS_SUCCESS;
-    tCsrRoamInfo roamInfo = {0};
+    tCsrRoamInfo *roam_info;
     tSirSmeDfsEventInd *dfs_event;
     tSirSmeCSAIeTxCompleteRsp *csaIeTxCompleteRsp;
     tANI_U32 sessionId = 0;
     eRoamCmdStatus roamStatus;
     eCsrRoamResult roamResult;
     int i;
+
+    roam_info = vos_mem_malloc(sizeof(*roam_info));
+    if (!roam_info)
+        return eHAL_STATUS_FAILED_ALLOC;
 
     switch (msgType)
     {
@@ -2497,20 +2539,21 @@ eHalStatus dfsMsgProcessor(tpAniSirGlobal pMac, v_U16_t msgType, void *pMsgBuf)
             smsLog(pMac, LOGE,
                    "%s: pMsg is NULL for eWNI_SME_DFS_RADAR_FOUND message",
                    __func__);
+            vos_mem_free(roam_info);
             return eHAL_STATUS_FAILURE;
          }
          sessionId = dfs_event->sessionId;
-         roamInfo.dfs_event.sessionId = sessionId;
-         roamInfo.dfs_event.chan_list.nchannels =
+         roam_info->dfs_event.sessionId = sessionId;
+         roam_info->dfs_event.chan_list.nchannels =
              dfs_event->chan_list.nchannels;
          for (i = 0; i < dfs_event->chan_list.nchannels; i++)
          {
-             roamInfo.dfs_event.chan_list.channels[i] =
+             roam_info->dfs_event.chan_list.channels[i] =
                  dfs_event->chan_list.channels[i];
          }
 
-         roamInfo.dfs_event.dfs_radar_status = dfs_event->dfs_radar_status;
-         roamInfo.dfs_event.use_nol = dfs_event->use_nol;
+         roam_info->dfs_event.dfs_radar_status = dfs_event->dfs_radar_status;
+         roam_info->dfs_event.use_nol = dfs_event->use_nol;
 
          roamStatus = eCSR_ROAM_DFS_RADAR_IND;
          roamResult = eCSR_ROAM_RESULT_DFS_RADAR_FOUND_IND;
@@ -2526,6 +2569,7 @@ eHalStatus dfsMsgProcessor(tpAniSirGlobal pMac, v_U16_t msgType, void *pMsgBuf)
             smsLog(pMac, LOGE,
                    "%s: pMsg is NULL for eWNI_SME_DFS_CSAIE_TX_COMPLETE_IND",
                    __func__);
+            vos_mem_free(roam_info);
             return eHAL_STATUS_FAILURE;
          }
          sessionId = csaIeTxCompleteRsp->sessionId;
@@ -2541,13 +2585,16 @@ eHalStatus dfsMsgProcessor(tpAniSirGlobal pMac, v_U16_t msgType, void *pMsgBuf)
          smsLog(pMac, LOG1, "%s: Invalid DFS message = 0x%x", __func__,
                 msgType);
          status = eHAL_STATUS_FAILURE;
+         vos_mem_free(roam_info);
          return status;
       }
     }
 
     /* Indicate Radar Event to SAP */
-    csrRoamCallCallback(pMac, sessionId, &roamInfo, 0,
+    csrRoamCallCallback(pMac, sessionId, roam_info, 0,
                         roamStatus, roamResult);
+    vos_mem_free(roam_info);
+
     return status;
 }
 
@@ -2568,7 +2615,7 @@ static eHalStatus sme_extended_change_channel_ind(tpAniSirGlobal mac_ctx,
 	struct sir_sme_ext_cng_chan_ind *ext_chan_ind;
 	eHalStatus status = eHAL_STATUS_SUCCESS;
 	uint32_t session_id = 0;
-	tCsrRoamInfo roamInfo = {0};
+	tCsrRoamInfo *roam_info;
 	eRoamCmdStatus roamStatus;
 	eCsrRoamResult roamResult;
 
@@ -2579,8 +2626,11 @@ static eHalStatus sme_extended_change_channel_ind(tpAniSirGlobal mac_ctx,
 			FL("pMsg is NULL for eWNI_SME_EXT_CHANGE_CHANNEL_IND"));
 		return eHAL_STATUS_FAILURE;
 	}
+	roam_info = vos_mem_malloc(sizeof(*roam_info));
+	if (!roam_info)
+		return eHAL_STATUS_FAILED_ALLOC;
 	session_id = ext_chan_ind->session_id;
-	roamInfo.target_channel = ext_chan_ind->new_channel;
+	roam_info->target_channel = ext_chan_ind->new_channel;
 	roamStatus = eCSR_ROAM_EXT_CHG_CHNL_IND;
 	roamResult = eCSR_ROAM_EXT_CHG_CHNL_UPDATE_IND;
 	smsLog(mac_ctx, LOG1,
@@ -2588,8 +2638,10 @@ static eHalStatus sme_extended_change_channel_ind(tpAniSirGlobal mac_ctx,
 		session_id);
 
 	/* Indicate Ext Channel Change event to SAP */
-	csrRoamCallCallback(mac_ctx, session_id, &roamInfo, 0,
+	csrRoamCallCallback(mac_ctx, session_id, roam_info, 0,
 					roamStatus, roamResult);
+	vos_mem_free(roam_info);
+
 	return status;
 }
 
@@ -2601,21 +2653,27 @@ static eHalStatus sme_extended_change_channel_ind(tpAniSirGlobal mac_ctx,
  *------------------------------------------------------------------*/
 eHalStatus sme_TsmIeInd(tHalHandle hHal, tSirSmeTsmIEInd *pSmeTsmIeInd)
 {
-    tpAniSirGlobal pMac = PMAC_STRUCT( hHal );
-    eHalStatus     status = eHAL_STATUS_SUCCESS;
-    tCsrRoamInfo   pRoamInfo = {0};
-    tANI_U32       SessionId = pSmeTsmIeInd->sessionId;
-    pRoamInfo.tsmIe.tsid= pSmeTsmIeInd->tsmIe.tsid;
-    pRoamInfo.tsmIe.state= pSmeTsmIeInd->tsmIe.state;
-    pRoamInfo.tsmIe.msmt_interval= pSmeTsmIeInd->tsmIe.msmt_interval;
-    /* forward the tsm ie information to HDD */
-    csrRoamCallCallback(pMac,
-                        SessionId,
-                        &pRoamInfo,
-                        0,
-                        eCSR_ROAM_TSM_IE_IND,
-                        0);
-    return status;
+	tpAniSirGlobal pMac = PMAC_STRUCT( hHal );
+	eHalStatus     status = eHAL_STATUS_SUCCESS;
+	tCsrRoamInfo   *roam_info;
+	tANI_U32       SessionId = pSmeTsmIeInd->sessionId;
+
+	roam_info = vos_mem_malloc(sizeof(*roam_info));
+	if (!roam_info)
+		return eHAL_STATUS_FAILED_ALLOC;
+	roam_info->tsmIe.tsid= pSmeTsmIeInd->tsmIe.tsid;
+	roam_info->tsmIe.state= pSmeTsmIeInd->tsmIe.state;
+	roam_info->tsmIe.msmt_interval= pSmeTsmIeInd->tsmIe.msmt_interval;
+	/* forward the tsm ie information to HDD */
+	csrRoamCallCallback(pMac,
+	                    SessionId,
+	                    roam_info,
+	                    0,
+	                    eCSR_ROAM_TSM_IE_IND,
+	                    0);
+	vos_mem_free(roam_info);
+
+	return status;
 }
 /* ---------------------------------------------------------------------------
     \fn sme_SetCCKMIe
@@ -3003,6 +3061,9 @@ eHalStatus sme_ProcessMsg(tHalHandle hHal, vos_msg_t* pMsg)
                    smsLog(pMac, LOGE, "Empty rsp message for meas "
                           "(eWNI_SME_CC_CHANGE_IND), nothing to process");
                 }
+                break;
+          case eWNI_SME_UPDATE_PWR_IND:
+                status = sme_handle_update_pwr_ind(pMac,pMsg->bodyval);
                 break;
           case eWNI_SME_POST_SWITCH_CHL_IND:
              {
@@ -5141,10 +5202,12 @@ eHalStatus sme_GetConfigParam(tHalHandle hHal, tSmeConfigParams *pParam)
               pMac->roam.configParam.sta_roam_policy.dfs_mode;
       pParam->csrConfig.sta_roam_policy_params.skip_unsafe_channels =
               pMac->roam.configParam.sta_roam_policy.skip_unsafe_channels;
+      pParam->snr_monitor_enabled = pMac->snr_monitor_enabled;
       pParam->sub20_config_info = pMac->sub20_config_info;
       pParam->sub20_channelwidth = pMac->sub20_channelwidth;
       pParam->sub20_dynamic_channelwidth = pMac->sub20_dynamic_channelwidth;
       pParam->sta_change_cc_via_beacon = pMac->sta_change_cc_via_beacon;
+      pParam->mcs_tx_force2chain = pMac->mcs_tx_force2chain;
       pParam->csrConfig.gStaLocalEDCAEnable =
               pMac->roam.configParam.gStaLocalEDCAEnable;
 #if defined WLAN_FEATURE_VOWIFI
@@ -8419,6 +8482,68 @@ eHalStatus sme_ConfigureResumeReq( tHalHandle hHal,
     return(status);
 }
 
+/**
+ * sme_prepare_mgmt_tx() - Prepares mgmt frame
+ * @hal: The handle returned by mac_open
+ * @session_id: session id
+ * @buf: pointer to frame
+ * @len: frame length
+ *
+ * Return: eHalStatus
+ */
+static eHalStatus sme_prepare_mgmt_tx(tHalHandle hal, uint8_t session_id,
+					const uint8_t *buf, uint32_t len)
+{
+	eHalStatus status = eHAL_STATUS_SUCCESS;
+	VOS_STATUS vos_status = VOS_STATUS_SUCCESS;
+	vos_msg_t vos_message;
+	struct sir_mgmt_msg *msg;
+	uint16_t msg_len;
+
+	VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_DEBUG,
+		  ("prepares auth frame"));
+
+	msg_len = sizeof(*msg) + len;
+	msg = vos_mem_malloc(msg_len);
+	if (msg == NULL) {
+		status = eHAL_STATUS_FAILED_ALLOC;
+	} else {
+		msg->type = eWNI_SME_SEND_MGMT_FRAME_TX;
+		msg->msg_len = msg_len;
+		msg->session_id = session_id;
+		msg->data = (uint8_t *)msg + sizeof(*msg);
+		vos_mem_copy(msg->data, buf, len);
+		vos_message.bodyptr = msg;
+		vos_message.type =  eWNI_SME_SEND_MGMT_FRAME_TX;
+		vos_status = vos_mq_post_message(VOS_MQ_ID_PE,
+						 &vos_message);
+		if (!VOS_IS_STATUS_SUCCESS(vos_status)) {
+			vos_mem_free(msg);
+			status = eHAL_STATUS_FAILURE;
+		}
+	}
+
+	return status;
+}
+
+eHalStatus sme_send_mgmt_tx(tHalHandle hal, uint8_t session_id,
+				const uint8_t *buf, uint32_t len)
+{
+	eHalStatus status = eHAL_STATUS_SUCCESS;
+	tpAniSirGlobal mac = PMAC_STRUCT(hal);
+
+	MTRACE(vos_trace(VOS_MODULE_ID_SME,
+		TRACE_CODE_SME_RX_HDD_SEND_MGMT_TX, session_id, 0));
+
+	status = sme_AcquireGlobalLock(&mac->sme);
+	if (HAL_STATUS_SUCCESS(status)) {
+		status = sme_prepare_mgmt_tx(hal, session_id, buf, len);
+		sme_ReleaseGlobalLock(&mac->sme);
+	}
+
+	return status;
+}
+
 #ifdef WLAN_FEATURE_EXTWOW_SUPPORT
 /* ---------------------------------------------------------------------------
 
@@ -9857,7 +9982,6 @@ eHalStatus sme_WakeReasonIndCallback (tHalHandle hHal, void* pMsg)
 eHalStatus sme_SetMaxTxPowerPerBand(eCsrBand band, v_S7_t dB,
                   tHalHandle hal)
 {
-	vos_msg_t msg;
 	eHalStatus status;
 	tSmeCmd *set_max_tx_pwr_per_band;
 	tpAniSirGlobal mac_ctx = PMAC_STRUCT(hal);
@@ -9871,9 +9995,6 @@ eHalStatus sme_SetMaxTxPowerPerBand(eCsrBand band, v_S7_t dB,
 	smsLog(mac_ctx, LOG1,
 		  FL("band : %d power %d dB"),
 		  band, dB);
-
-	MTRACE(vos_trace(VOS_MODULE_ID_SME,
-			TRACE_CODE_SME_TX_WDA_MSG, NO_SESSION, msg.type));
 
 	status = sme_AcquireGlobalLock(&mac_ctx->sme);
 	if (HAL_STATUS_SUCCESS(status)) {
@@ -12867,7 +12988,7 @@ void sme_UpdateEnableSSR(tHalHandle hHal, tANI_BOOLEAN enableSSR)
 /*
  * SME API to stringify bonding mode. (hostapd convention)
  */
-
+#ifdef WLAN_DEBUG
 static const char* sme_CBMode2String( tANI_U32 mode)
 {
    switch (mode)
@@ -12893,6 +13014,7 @@ static const char* sme_CBMode2String( tANI_U32 mode)
          return "Unknown";
    }
 }
+#endif
 
 /*
  * SME API to adjust bonding mode to regulatory, dfs nol .. etc.
@@ -13055,7 +13177,7 @@ eIniChanBondState sme_SelectCBMode(tHalHandle hHal, eCsrPhyMode eCsrPhyMode,
                             uint16_t *vht_channel_width,
                             uint16_t ch_width_orig)
 {
-   tSmeConfigParams  smeConfig;
+   tSmeConfigParams  *smeConfig;
    tANI_U32 ht40plus2gendch = 0;
    tpAniSirGlobal    pMac = PMAC_STRUCT(hHal);
    eIniChanBondState cb_mode = eCSR_INI_SINGLE_CHANNEL_CENTERED;
@@ -13066,53 +13188,60 @@ eIniChanBondState sme_SelectCBMode(tHalHandle hHal, eCsrPhyMode eCsrPhyMode,
                 "%s: HW: %d CH: %d ORIG_BW: %d\n", __func__, eCsrPhyMode,
                 channel, ch_width_orig);
 
+	smeConfig = vos_mem_malloc(sizeof(tSmeConfigParams));
+	if (!smeConfig) {
+		VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_ERROR,
+		       FL("Can't alloc mem for sme config"));
+		return -EINVAL;
+	}
+
    *vht_channel_width = ch_width_orig;
-   vos_mem_zero(&smeConfig, sizeof (tSmeConfigParams));
-   sme_GetConfigParam(pMac, &smeConfig);
+   vos_mem_zero(smeConfig, sizeof (tSmeConfigParams));
+   sme_GetConfigParam(pMac, smeConfig);
 
    if ((eCSR_DOT11_MODE_11ac == eCsrPhyMode ||
         eCSR_DOT11_MODE_11ac_ONLY == eCsrPhyMode) &&
         (eHT_CHANNEL_WIDTH_80MHZ == ch_width_orig)) {
       if (channel== 36 || channel == 52 || channel == 100 ||
                 channel == 116 || channel == 149 || channel == 132) {
-          smeConfig.csrConfig.channelBondingMode5GHz =
+          smeConfig->csrConfig.channelBondingMode5GHz =
                 eCSR_INI_QUADRUPLE_CHANNEL_20MHZ_LOW_40MHZ_LOW;
       } else if (channel == 40 || channel == 56 || channel == 104 ||
                      channel == 120 || channel == 153 || channel == 136) {
-          smeConfig.csrConfig.channelBondingMode5GHz =
+          smeConfig->csrConfig.channelBondingMode5GHz =
                 eCSR_INI_QUADRUPLE_CHANNEL_20MHZ_HIGH_40MHZ_LOW;
       } else if (channel == 44 || channel == 60 || channel == 108 ||
                      channel == 124 || channel == 157 || channel == 140) {
-          smeConfig.csrConfig.channelBondingMode5GHz =
+          smeConfig->csrConfig.channelBondingMode5GHz =
                 eCSR_INI_QUADRUPLE_CHANNEL_20MHZ_LOW_40MHZ_HIGH;
       } else if (channel == 48 || channel == 64 || channel == 112 ||
                      channel == 128 || channel == 144 || channel == 161) {
-          smeConfig.csrConfig.channelBondingMode5GHz =
+          smeConfig->csrConfig.channelBondingMode5GHz =
                 eCSR_INI_QUADRUPLE_CHANNEL_20MHZ_HIGH_40MHZ_HIGH;
       } else if (channel == 165) {
-          smeConfig.csrConfig.channelBondingMode5GHz =
+          smeConfig->csrConfig.channelBondingMode5GHz =
                                      eCSR_INI_SINGLE_CHANNEL_CENTERED;
           *vht_channel_width = eHT_CHANNEL_WIDTH_20MHZ;
       } else if (channel >= 1 && channel < 5) {
-          smeConfig.csrConfig.channelBondingMode24GHz =
+          smeConfig->csrConfig.channelBondingMode24GHz =
                 eCSR_INI_DOUBLE_CHANNEL_LOW_PRIMARY;
           *vht_channel_width = eHT_CHANNEL_WIDTH_40MHZ;
       } else if (channel >= 5 && channel <= 9) {
           if (0 != ht_sec_ch) {
               if (ht_sec_ch > channel)
-                  smeConfig.csrConfig.channelBondingMode24GHz =
+                  smeConfig->csrConfig.channelBondingMode24GHz =
                         eCSR_INI_DOUBLE_CHANNEL_LOW_PRIMARY;
               else
-                  smeConfig.csrConfig.channelBondingMode24GHz =
+                  smeConfig->csrConfig.channelBondingMode24GHz =
                         eCSR_INI_DOUBLE_CHANNEL_HIGH_PRIMARY;
 	  }
           *vht_channel_width = eHT_CHANNEL_WIDTH_40MHZ;
       } else if (channel > 9 && channel <= 13) {
-          smeConfig.csrConfig.channelBondingMode24GHz =
+          smeConfig->csrConfig.channelBondingMode24GHz =
                 eCSR_INI_DOUBLE_CHANNEL_HIGH_PRIMARY;
           *vht_channel_width = eHT_CHANNEL_WIDTH_40MHZ;
       } else if (channel ==14) {
-          smeConfig.csrConfig.channelBondingMode24GHz =
+          smeConfig->csrConfig.channelBondingMode24GHz =
                 eCSR_INI_SINGLE_CHANNEL_CENTERED;
           *vht_channel_width = eHT_CHANNEL_WIDTH_20MHZ;
       }
@@ -13129,55 +13258,56 @@ eIniChanBondState sme_SelectCBMode(tHalHandle hHal, eCsrPhyMode eCsrPhyMode,
                 channel == 64 || channel == 104 || channel == 112 ||
                 channel == 120 || channel == 128 || channel == 136 ||
                 channel == 153 || channel == 161 || channel == 144) {
-           smeConfig.csrConfig.channelBondingMode5GHz =
+           smeConfig->csrConfig.channelBondingMode5GHz =
                                     eCSR_INI_DOUBLE_CHANNEL_HIGH_PRIMARY;
        } else if (channel== 36 || channel == 44 || channel == 52 ||
                 channel == 60 || channel == 100 || channel == 108 ||
                 channel == 116 || channel == 124 || channel == 132 ||
                 channel == 149 || channel == 157 || channel == 140) {
-           smeConfig.csrConfig.channelBondingMode5GHz =
+           smeConfig->csrConfig.channelBondingMode5GHz =
                                         eCSR_INI_DOUBLE_CHANNEL_LOW_PRIMARY;
        } else if (channel == 165) {
-           smeConfig.csrConfig.channelBondingMode5GHz =
+           smeConfig->csrConfig.channelBondingMode5GHz =
                                             eCSR_INI_SINGLE_CHANNEL_CENTERED;
            *vht_channel_width = eHT_CHANNEL_WIDTH_20MHZ;
        } else if (channel >= 1 && channel < 5) {
-           smeConfig.csrConfig.channelBondingMode24GHz =
+           smeConfig->csrConfig.channelBondingMode24GHz =
                                            eCSR_INI_DOUBLE_CHANNEL_LOW_PRIMARY;
        } else if (channel >= 5 && channel <= ht40plus2gendch) {
           if (ht_sec_ch > channel)
-              smeConfig.csrConfig.channelBondingMode24GHz =
+              smeConfig->csrConfig.channelBondingMode24GHz =
                     eCSR_INI_DOUBLE_CHANNEL_LOW_PRIMARY;
           else
-              smeConfig.csrConfig.channelBondingMode24GHz =
+              smeConfig->csrConfig.channelBondingMode24GHz =
                     eCSR_INI_DOUBLE_CHANNEL_HIGH_PRIMARY;
        } else if (channel > ht40plus2gendch && channel <= 13) {
-           smeConfig.csrConfig.channelBondingMode24GHz =
+           smeConfig->csrConfig.channelBondingMode24GHz =
                                            eCSR_INI_DOUBLE_CHANNEL_HIGH_PRIMARY;
        } else if (channel ==14) {
-           smeConfig.csrConfig.channelBondingMode24GHz =
+           smeConfig->csrConfig.channelBondingMode24GHz =
               eCSR_INI_SINGLE_CHANNEL_CENTERED;
            *vht_channel_width = eHT_CHANNEL_WIDTH_20MHZ;
        }
    } else {
        *vht_channel_width = eHT_CHANNEL_WIDTH_20MHZ;
        if (channel <= 14) {
-           smeConfig.csrConfig.channelBondingMode24GHz =
+           smeConfig->csrConfig.channelBondingMode24GHz =
                             eCSR_INI_SINGLE_CHANNEL_CENTERED;
        } else {
-           smeConfig.csrConfig.channelBondingMode5GHz =
+           smeConfig->csrConfig.channelBondingMode5GHz =
                             eCSR_INI_SINGLE_CHANNEL_CENTERED;
        }
    }
 
-   sme_AdjustCBMode(pMac, &smeConfig, channel, vht_channel_width);
-   sme_UpdateConfig (pMac, &smeConfig);
-   cb_mode = (channel <= 14) ? smeConfig.csrConfig.channelBondingMode24GHz :
-                        smeConfig.csrConfig.channelBondingMode5GHz;
+   sme_AdjustCBMode(pMac, smeConfig, channel, vht_channel_width);
+   sme_UpdateConfig (pMac, smeConfig);
+   cb_mode = (channel <= 14) ? smeConfig->csrConfig.channelBondingMode24GHz :
+                        smeConfig->csrConfig.channelBondingMode5GHz;
    VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_WARN,
          "%s: CH: %d NEW_BW: %d %s-CB_Mode:%d", __func__, channel,
          *vht_channel_width, (channel <=14) ? "2G" : "5G", cb_mode);
 
+   vos_mem_free(smeConfig);
    return cb_mode;
 }
 
@@ -14635,12 +14765,12 @@ eHalStatus sme_set_cts2self_for_p2p_go(tHalHandle hal_handle)
  * @value                          reference to the value
  * Return: hal_status
  */
-eHalStatus sme_set_ac_txq_optimize(tHalHandle hal_handle, uint8_t *value)
+eHalStatus sme_set_ac_txq_optimize(tHalHandle hal_handle, uint8_t value)
 {
 	eHalStatus status = eHAL_STATUS_SUCCESS;
 	vos_msg_t vos_msg;
 
-	vos_msg.bodyptr = value;
+	vos_msg.bodyval = value;
 	vos_msg.type = WDA_SET_AC_TXQ_OPTIMIZE;
 	if (!VOS_IS_STATUS_SUCCESS(vos_mq_post_message(VOS_MODULE_ID_WDA,
 						       &vos_msg))) {
@@ -15216,27 +15346,32 @@ eHalStatus sme_ProcessChannelChangeResp(tpAniSirGlobal pMac,
                                      v_U16_t msg_type, void *pMsgBuf)
 {
     eHalStatus status = eHAL_STATUS_SUCCESS;
-    tCsrRoamInfo pRoamInfo = {0};
+    tCsrRoamInfo *roam_info;
     eCsrRoamResult roamResult;
     tpSwitchChannelParams pChnlParams = (tpSwitchChannelParams) pMsgBuf;
     tANI_U32 SessionId = pChnlParams->peSessionId;
 
-    pRoamInfo.channelChangeRespEvent =
-    (tSirChanChangeResponse *)vos_mem_malloc(
+    roam_info = vos_mem_malloc(sizeof(*roam_info));
+    if (!roam_info)
+        return eHAL_STATUS_FAILED_ALLOC;
+    roam_info->channelChangeRespEvent =
+        (tSirChanChangeResponse *)vos_mem_malloc(
                                 sizeof(tSirChanChangeResponse));
-    if (NULL == pRoamInfo.channelChangeRespEvent)
+    if (NULL == roam_info->channelChangeRespEvent)
     {
         status = eHAL_STATUS_FAILURE;
         smsLog(pMac, LOGE, "Channel Change Event Allocation Failed: %d\n",
               status);
+        vos_mem_free(roam_info);
+
         return status;
     }
     if (msg_type == eWNI_SME_CHANNEL_CHANGE_RSP)
     {
-        pRoamInfo.channelChangeRespEvent->sessionId = SessionId;
-        pRoamInfo.channelChangeRespEvent->newChannelNumber =
+        roam_info->channelChangeRespEvent->sessionId = SessionId;
+        roam_info->channelChangeRespEvent->newChannelNumber =
                                            pChnlParams->channelNumber;
-        pRoamInfo.channelChangeRespEvent->secondaryChannelOffset =
+        roam_info->channelChangeRespEvent->secondaryChannelOffset =
                                   pChnlParams->secondaryChannelOffset;
 
         if (pChnlParams->status == eHAL_STATUS_SUCCESS)
@@ -15244,7 +15379,7 @@ eHalStatus sme_ProcessChannelChangeResp(tpAniSirGlobal pMac,
             VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_INFO_MED,
             "sapdfs: Received success eWNI_SME_CHANNEL_CHANGE_RSP for sessionId[%d]",
                       SessionId);
-            pRoamInfo.channelChangeRespEvent->channelChangeStatus = 1;
+            roam_info->channelChangeRespEvent->channelChangeStatus = 1;
             roamResult = eCSR_ROAM_RESULT_CHANNEL_CHANGE_SUCCESS;
         }
         else
@@ -15252,12 +15387,12 @@ eHalStatus sme_ProcessChannelChangeResp(tpAniSirGlobal pMac,
             VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_INFO_MED,
             "sapdfs: Received failure eWNI_SME_CHANNEL_CHANGE_RSP for sessionId[%d]",
                       SessionId);
-            pRoamInfo.channelChangeRespEvent->channelChangeStatus = 0;
+            roam_info->channelChangeRespEvent->channelChangeStatus = 0;
             roamResult = eCSR_ROAM_RESULT_CHANNEL_CHANGE_FAILURE;
         }
 
-        csrRoamCallCallback(pMac, SessionId, &pRoamInfo, 0,
-                                  eCSR_ROAM_SET_CHANNEL_RSP, roamResult);
+        csrRoamCallCallback(pMac, SessionId, roam_info, 0,
+                            eCSR_ROAM_SET_CHANNEL_RSP, roamResult);
 
     }
     else
@@ -15266,7 +15401,8 @@ eHalStatus sme_ProcessChannelChangeResp(tpAniSirGlobal pMac,
         smsLog(pMac, LOGE, "Invalid Channel Change Resp Message: %d\n",
               status);
     }
-    vos_mem_free(pRoamInfo.channelChangeRespEvent);
+    vos_mem_free(roam_info->channelChangeRespEvent);
+    vos_mem_free(roam_info);
 
     return status;
 }
@@ -15970,25 +16106,13 @@ VOS_STATUS sme_UpdateDSCPtoUPMapping( tHalHandle hHal,
             for (i = 0; i < SME_QOS_WMM_UP_MAX; i++)
             {
                 for (j = pSession->QosMapSet.dscp_range[i][0];
-                               j <= pSession->QosMapSet.dscp_range[i][1]; j++)
-                {
-                   if ((pSession->QosMapSet.dscp_range[i][0] == 255) &&
-                                (pSession->QosMapSet.dscp_range[i][1] == 255))
-                   {
-                       VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_ERROR,
-                       "%s: User Priority %d is not used in mapping",
-                                                             __func__, i);
-                       break;
-                   }
-                   else
-                   {
-                       dscpmapping[j]= i;
-                   }
-                }
+                               j <= pSession->QosMapSet.dscp_range[i][1] &&
+                               j <= WLAN_MAX_DSCP; j++)
+                    dscpmapping[j]= i;
             }
             for (i = 0; i< pSession->QosMapSet.num_dscp_exceptions; i++)
             {
-                if (pSession->QosMapSet.dscp_exceptions[i][0] != 255)
+                if (pSession->QosMapSet.dscp_exceptions[i][0] <= WLAN_MAX_DSCP)
                 {
                     dscpmapping[pSession->QosMapSet.dscp_exceptions[i][0] ] =
                                          pSession->QosMapSet.dscp_exceptions[i][1];
@@ -17027,6 +17151,49 @@ eHalStatus sme_power_debug_stats_req(tHalHandle hal, void (*callback_fn)
 	return status;
 }
 #endif
+
+eHalStatus sme_ll_stats_set_primary_mac(tHalHandle hal,
+					uint8_t session_id,
+					tSirMacAddr mac_addr)
+{
+	eHalStatus status    = eHAL_STATUS_SUCCESS;
+	VOS_STATUS vos_status = VOS_STATUS_SUCCESS;
+	tpAniSirGlobal mac  = PMAC_STRUCT(hal);
+	vos_msg_t message;
+	struct hal_primary_params *primary_peer;
+
+	primary_peer = vos_mem_malloc(sizeof(*primary_peer));
+	if (!primary_peer) {
+		VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_ERROR,
+			  "%s: Fail to alloc mem", __func__);
+		return eHAL_STATUS_FAILURE;
+	}
+
+	vos_mem_copy(primary_peer->bssid, mac_addr, sizeof(tSirMacAddr));
+	primary_peer->session_id = session_id;
+
+	if (eHAL_STATUS_SUCCESS == sme_AcquireGlobalLock(&mac->sme)) {
+		/* Serialize the req through MC thread */
+		message.bodyptr = primary_peer;
+		message.type    = WDA_LINK_LAYER_STATS_SET_PRIMARY_PEER;
+		MTRACE(vos_trace(VOS_MODULE_ID_SME, TRACE_CODE_SME_TX_WDA_MSG,
+				 NO_SESSION, message.type));
+		vos_status = vos_mq_post_message(VOS_MQ_ID_WDA, &message);
+		if (!VOS_IS_STATUS_SUCCESS(vos_status)) {
+			VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_ERROR,
+				  "%s: not able to post WDA_LINK_LAYER_STATS_SET_PRIMARY_PEER",
+				  __func__);
+			vos_mem_free(primary_peer);
+			status = eHAL_STATUS_FAILURE;
+		}
+		sme_ReleaseGlobalLock(&mac->sme);
+	} else {
+		VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_ERROR,
+			  FL("sme_AcquireGlobalLock error"));
+		status = eHAL_STATUS_FAILURE;
+	}
+	return status;
+}
 
 /**
  * eHalStatus sme_ll_stats_set_thresh - set threshold for mac counters
@@ -18107,6 +18274,42 @@ VOS_STATUS sme_mnt_filter_type_cmd(struct sme_mnt_filter_type_req *input)
 #define THROTTLE_TX_THRESHOLD_MAX  (400)
 #define MAX_DUTY_CYCLE_VAL         (100)
 
+eHalStatus sme_hpcs_pulse_params_conf_cmd(tHalHandle hHal,
+                                          tSirHpcsPulseParmasConfig *pHpcsPulseParams)
+{
+    vos_msg_t msg;
+    struct hal_hpcs_pulse_params *hpcs_pulse_params;
+
+    hpcs_pulse_params = vos_mem_malloc(sizeof(*hpcs_pulse_params));
+    if (!hpcs_pulse_params) {
+        VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_ERROR,
+                  FL("Unable to allocate memory"));
+        return eHAL_STATUS_FAILED_ALLOC;
+    }
+
+    vos_mem_zero(hpcs_pulse_params, sizeof(*hpcs_pulse_params));
+
+    hpcs_pulse_params->vdev_id            = pHpcsPulseParams->vdev_id;
+    hpcs_pulse_params->start              = pHpcsPulseParams->start;
+    hpcs_pulse_params->sync_time          = pHpcsPulseParams->sync_time;
+    hpcs_pulse_params->pulse_interval     = pHpcsPulseParams->pulse_interval;
+    hpcs_pulse_params->active_sync_period = pHpcsPulseParams->active_sync_period;
+    hpcs_pulse_params->gpio_pin           = pHpcsPulseParams->gpio_pin;
+    hpcs_pulse_params->pulse_width        = pHpcsPulseParams->pulse_width;
+
+    msg.type = WDA_SET_HPCS_PULSE_PARAMS;
+    msg.reserved = 0;
+    msg.bodyptr = hpcs_pulse_params;
+
+    if (VOS_STATUS_SUCCESS != vos_mq_post_message(VOS_MODULE_ID_WDA, &msg)) {
+        VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_ERROR,
+                  FL("Unable to post WMI_HPCS_PULSE_START_CMDID message"));
+        vos_mem_free(hpcs_pulse_params);
+        return eHAL_STATUS_FAILURE;
+    }
+    return eHAL_STATUS_SUCCESS;
+}
+
 eHalStatus sme_thermal_throttle_mgmt_cmd(tHalHandle hHal, tANI_U16 lower_thresh_deg,
                                          tANI_U16 higher_thresh_deg)
 {
@@ -18451,6 +18654,17 @@ sme_set_sta_chanlist_with_sub20(tHalHandle hal_ptr, uint8_t chan_width)
 		status = csrUpdateChannelList(mac_ptr);
 	}
 	sme_ReleaseGlobalLock(&mac_ptr->sme);
+
+	return status;
+}
+
+eHalStatus
+sme_set_cali_chanlist(tHalHandle hal_ptr)
+{
+	eHalStatus status = eHAL_STATUS_SUCCESS;
+	tpAniSirGlobal mac_ptr  = PMAC_STRUCT(hal_ptr);
+
+	status = csrUpdateCaliChannelList(mac_ptr);
 
 	return status;
 }
@@ -19400,6 +19614,45 @@ VOS_STATUS sme_configure_pta_coex(uint8_t coex_pta_config_enable, uint32_t coex_
 }
 #endif
 
+#ifdef FEATURE_COEX_TPUT_SHAPING_CONFIG
+/**
+ * sme_configure_tput_shaping_enable() - Set coex traffic shaping enable/disable
+ * @coex_tput_shaping_enable: traffic shaping enable or not
+ *
+ * Return: Return VOS_STATUS.
+ */
+VOS_STATUS sme_configure_tput_shaping_enable(uint32_t coex_tput_shaping_enable)
+{
+	vos_msg_t msg = {0};
+	VOS_STATUS vos_status;
+	WMI_COEX_CONFIG_CMD_fixed_param *sme_pta_config;
+
+	sme_pta_config = vos_mem_malloc(sizeof(*sme_pta_config));
+	if (!sme_pta_config) {
+		VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_ERROR,
+			  FL("Malloc failed"));
+		return VOS_STATUS_E_NOMEM;
+	}
+
+	sme_pta_config->config_type = WMI_COEX_CONFIG_ENABLE_TPUT_SHAPING;
+	sme_pta_config->config_arg1 = coex_tput_shaping_enable;
+
+	msg.type = WDA_BTC_BT_WLAN_INTERVAL_CMD;
+	msg.reserved = 0;
+	msg.bodyptr = sme_pta_config;
+
+	vos_status = vos_mq_post_message(VOS_MODULE_ID_WDA,&msg);
+	if (!VOS_IS_STATUS_SUCCESS(vos_status)) {
+		VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_ERROR,
+			  FL("Not able to post message to WDA"));
+		vos_mem_free(sme_pta_config);
+		return VOS_STATUS_E_FAILURE;
+	}
+
+	return vos_status;
+}
+#endif
+
 /**
  * sme_set_beacon_filter() - set the beacon filter configuration
  * @vdev_id: vdev index id
@@ -19915,6 +20168,42 @@ VOS_STATUS sme_set_btc_wlan_coex_tx_power(uint32_t coex_tx_power)
 
 	return vos_status;
 }
+
+#ifdef WMI_COEX_BTC_DUTYCYCLE
+VOS_STATUS sme_set_btc_coex_dutycycle(uint32_t coex_btc_PauseDuration,uint32_t coex_btc_UnPauseDuration)
+{
+	vos_msg_t msg = {0};
+	VOS_STATUS vos_status;
+	WMI_COEX_CONFIG_CMD_fixed_param *sme_interval;
+
+	sme_interval = vos_mem_malloc(sizeof(*sme_interval));
+	if (!sme_interval) {
+		VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_ERROR,
+			  FL("Malloc failed"));
+		return VOS_STATUS_E_NOMEM;
+	}
+
+	sme_interval->config_type = WMI_COEX_CONFIG_BTC_DUTYCYCLE;
+	sme_interval->config_arg1 = coex_btc_PauseDuration;
+	sme_interval->config_arg2 = coex_btc_UnPauseDuration;
+	printk(KERN_ERR "ENTER sme_set_btc_coex_dutycycle = %d",coex_btc_PauseDuration);
+	printk(KERN_ERR "ENTER sme_set_btc_coex_dutycycle =%d",coex_btc_UnPauseDuration);
+
+	msg.type = WDA_BTC_BT_WLAN_INTERVAL_CMD;
+	msg.reserved = 0;
+	msg.bodyptr = sme_interval;
+
+	vos_status = vos_mq_post_message(VOS_MODULE_ID_WDA,&msg);
+	if (!VOS_IS_STATUS_SUCCESS(vos_status)) {
+		VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_ERROR,
+			  FL("Not able to post message to WDA"));
+		vos_mem_free(sme_interval);
+		return VOS_STATUS_E_FAILURE;
+	}
+
+	return vos_status;
+}
+#endif
 
 /**
  * sme_send_disassoc_req_frame - send disassoc req
@@ -20981,6 +21270,21 @@ eHalStatus sme_MotionDetBaseLineEnable(tHalHandle hHal, tSirMotionDetBaseLineEna
 }
 #endif
 
+eHalStatus sme_update_owe_info(tHalHandle hal,
+			       struct sSirSmeAssocInd *assoc_ind)
+{
+	tpAniSirGlobal mac = PMAC_STRUCT(hal);
+	eHalStatus status;
+
+	status = sme_AcquireGlobalLock(&mac->sme);
+	if (HAL_STATUS_SUCCESS(status)) {
+		status = csr_update_owe_info(mac, assoc_ind);
+		sme_ReleaseGlobalLock(&mac->sme);
+	}
+
+	return status;
+}
+
 uint32_t sme_unpack_rsn_ie(tHalHandle hal, uint8_t *buf,
                            uint8_t buf_len,
                            tDot11fIERSN *rsn_ie)
@@ -20988,4 +21292,270 @@ uint32_t sme_unpack_rsn_ie(tHalHandle hal, uint8_t *buf,
          tpAniSirGlobal mac_ctx = PMAC_STRUCT(hal);
 
          return dot11fUnpackIeRSN(mac_ctx, buf, buf_len, rsn_ie);
+}
+
+#ifdef WLAN_FEATURE_SAE
+eHalStatus sme_handle_sae_msg(tHalHandle hal, uint8_t session_id,
+			      uint8_t sae_status,
+			      tSirMacAddr peer_mac_addr)
+{
+	eHalStatus hal_status = eHAL_STATUS_SUCCESS;
+	tpAniSirGlobal mac = PMAC_STRUCT(hal);
+	struct sir_sae_msg *sae_msg;
+	vos_msg_t vos_message;
+	VOS_STATUS vos_status = VOS_STATUS_SUCCESS;
+
+	hal_status = sme_AcquireGlobalLock(&mac->sme);
+	if (HAL_STATUS_SUCCESS(hal_status)) {
+		sae_msg = vos_mem_malloc(sizeof(*sae_msg));
+		if (!sae_msg) {
+			hal_status = eHAL_STATUS_FAILED_ALLOC;
+			VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_ERROR,
+				"SAE: memory allocation failed");
+		} else {
+			sae_msg->message_type = eWNI_SME_SEND_SAE_MSG;
+			sae_msg->length = sizeof(*sae_msg);
+			sae_msg->session_id = session_id;
+			sae_msg->sae_status = sae_status;
+			vos_mem_copy(sae_msg->peer_mac_addr,
+				     peer_mac_addr,
+				     VOS_MAC_ADDR_SIZE);
+			vos_message.bodyptr = sae_msg;
+			vos_message.type =  eWNI_SME_SEND_SAE_MSG;
+			VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_DEBUG,
+				  "SAE: sae_status %d session_id %d Peer: "
+				  MAC_ADDRESS_STR,
+				  sae_msg->sae_status,
+				  sae_msg->session_id,
+				  MAC_ADDR_ARRAY(sae_msg->peer_mac_addr));
+
+			vos_status = vos_mq_post_message(VOS_MQ_ID_PE,
+							 &vos_message);
+			if (!VOS_IS_STATUS_SUCCESS(vos_status)) {
+				vos_mem_free(sae_msg);
+				hal_status = eHAL_STATUS_FAILURE;
+			}
+		}
+		sme_ReleaseGlobalLock(&mac->sme);
+	}
+
+	return hal_status;
+}
+#endif
+
+#ifdef WLAN_SMART_ANTENNA_FEATURE
+/**
+ * sme_set_rx_antenna() - Set atenna matrix
+ * @hal: The handle returned by mac_open
+ * @matrix: smart antenaa matrix
+ *
+ * Return: HAL_STATUS
+ */
+eHalStatus sme_set_rx_antenna(tHalHandle hal,
+			      uint32_t matrix)
+{
+	vos_msg_t vos_message;
+	tpAniSirGlobal mac = PMAC_STRUCT(hal);
+	eHalStatus hal_status = eHAL_STATUS_SUCCESS;
+	VOS_STATUS vos_status;
+
+	hal_status = sme_AcquireGlobalLock(&mac->sme);
+	if (HAL_STATUS_SUCCESS(hal_status)) {
+		vos_message.type = WDA_SET_RX_ANTENNA;
+		vos_message.bodyval = matrix;
+		VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_DEBUG,
+			  FL("Smart Antenna Matrix=%d"),
+			  matrix);
+
+		vos_status = vos_mq_post_message(VOS_MQ_ID_WDA,
+						 &vos_message);
+		if (!VOS_IS_STATUS_SUCCESS(vos_status))
+			hal_status = eHAL_STATUS_FAILURE;
+
+		sme_ReleaseGlobalLock(&mac->sme);
+	}
+
+	return hal_status;
+}
+#endif
+
+/**
+ * sme_set_gpio_cfg() - Set GPIO config
+ * @gpio_num: GPIO number to be setup
+ * @input: 0 - Output/ 1 - Input
+ * @pull_type: Pull type
+ * @intr_mode: Interrupt mode
+ * @mux_config_val: mux_config_val
+ *
+ * Return: HAL_STATUS
+ */
+eHalStatus sme_set_gpio_cfg(tHalHandle hal, uint32_t gpio_num,
+			    uint32_t input, uint32_t pull_type,
+			    uint32_t intr_mode, uint32_t mux_config_val)
+{
+	vos_msg_t vos_message;
+	tpAniSirGlobal mac = PMAC_STRUCT(hal);
+	eHalStatus hal_status = eHAL_STATUS_SUCCESS;
+	VOS_STATUS vos_status;
+	struct hal_gpio_cfg *gpio_cfg;
+
+	hal_status = sme_AcquireGlobalLock(&mac->sme);
+	if (HAL_STATUS_SUCCESS(hal_status)) {
+		gpio_cfg = vos_mem_malloc(sizeof(*gpio_cfg));
+		if (!gpio_cfg) {
+			hal_status = eHAL_STATUS_FAILED_ALLOC;
+			VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_ERROR,
+				"SAE: memory allocation failed");
+		} else {
+			gpio_cfg->gpio_num = gpio_num;
+			gpio_cfg->input = input;
+			gpio_cfg->pull_type = pull_type;
+			gpio_cfg->intr_mode = intr_mode;
+			gpio_cfg->mux_config_val = mux_config_val;
+			vos_message.type = WDA_SET_GPIO_CFG;
+			vos_message.bodyptr = gpio_cfg;
+			VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_DEBUG,
+				  "Post GPIO config message. gpio_num=%d, input=%d, pull_type=%d, intr_mode=%d, mux_config_val=%d",
+				  gpio_num, input, pull_type,
+				  intr_mode, mux_config_val);
+
+			vos_status = vos_mq_post_message(VOS_MQ_ID_WDA,
+							 &vos_message);
+			if (!VOS_IS_STATUS_SUCCESS(vos_status)) {
+				hal_status = eHAL_STATUS_FAILURE;
+				vos_mem_free(gpio_cfg);
+			}
+		}
+		sme_ReleaseGlobalLock(&mac->sme);
+	}
+
+	return hal_status;
+}
+
+/**
+ * sme_set_gpio_output() - Set GPIO ouput
+ * @gpio_num: GPIO number to be setup
+ * @set: Set the GPIO pin
+ *
+ * Return: HAL_STATUS
+ */
+eHalStatus sme_set_gpio_output(tHalHandle hal,
+			       uint32_t gpio_num,
+			       uint32_t set)
+{
+	vos_msg_t vos_message;
+	tpAniSirGlobal mac = PMAC_STRUCT(hal);
+	eHalStatus hal_status = eHAL_STATUS_SUCCESS;
+	VOS_STATUS vos_status;
+	struct hal_gpio_output *gpio_output;
+
+	hal_status = sme_AcquireGlobalLock(&mac->sme);
+	if (HAL_STATUS_SUCCESS(hal_status)) {
+		gpio_output = vos_mem_malloc(sizeof(*gpio_output));
+		if (!gpio_output) {
+			hal_status = eHAL_STATUS_FAILED_ALLOC;
+			VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_ERROR,
+				"SAE: memory allocation failed");
+		} else {
+			gpio_output->gpio_num = gpio_num;
+			gpio_output->set = set;
+			vos_message.type = WDA_SET_GPIO_OUTPUT;
+			vos_message.bodyptr = gpio_output;
+			VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_DEBUG,
+				  "Post GPIO output messagee. gpio_num=%d, set=%d",
+				  gpio_num, set);
+
+			vos_status = vos_mq_post_message(VOS_MQ_ID_WDA,
+							 &vos_message);
+			if (!VOS_IS_STATUS_SUCCESS(vos_status)) {
+				hal_status = eHAL_STATUS_FAILURE;
+				vos_mem_free(gpio_output);
+			}
+		}
+		sme_ReleaseGlobalLock(&mac->sme);
+	}
+
+	return hal_status;
+}
+
+eHalStatus sme_spectral_scan_enable(tHalHandle hal,
+				    sir_spectral_enable_params_t *params)
+{
+	eHalStatus status = eHAL_STATUS_SUCCESS;
+	VOS_STATUS vos_status = VOS_STATUS_SUCCESS;
+	tpAniSirGlobal mac_ctx = PMAC_STRUCT(hal);
+	vos_msg_t vos_msg;
+	sir_spectral_enable_params_t *spectral_enable_params;
+
+	spectral_enable_params = vos_mem_malloc(sizeof(*spectral_enable_params));
+	if (!spectral_enable_params) {
+		VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_ERROR,
+			  FL("Failed to alloc spectral enable params"));
+		return eHAL_STATUS_FAILED_ALLOC;
+	}
+
+	*spectral_enable_params = *params;
+
+	status = sme_AcquireGlobalLock(&mac_ctx->sme);
+	if (status == eHAL_STATUS_SUCCESS) {
+		/* Serialize the req through MC thread */
+		vos_msg.bodyptr = spectral_enable_params;
+		vos_msg.type = SIR_HAL_SPECTRAL_SCAN_ENABLE_CMDID;
+		vos_status = vos_mq_post_message(VOS_MQ_ID_WDA, &vos_msg);
+
+		if (!VOS_IS_STATUS_SUCCESS(vos_status)) {
+			VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_ERROR,
+				  FL("post spectal scan enable msg fail"));
+			status = eHAL_STATUS_FAILURE;
+			vos_mem_free(spectral_enable_params);
+		}
+		sme_ReleaseGlobalLock(&mac_ctx->sme);
+	} else {
+		VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_ERROR,
+			  FL("sme_AcquireGlobalLock failed"));
+		vos_mem_free(spectral_enable_params);
+	}
+
+	return status;
+}
+
+eHalStatus sme_spectral_scan_config(tHalHandle hal,
+				    sir_spectral_config_params_t *params)
+{
+	eHalStatus status = eHAL_STATUS_SUCCESS;
+	VOS_STATUS vos_status = VOS_STATUS_SUCCESS;
+	tpAniSirGlobal mac_ctx = PMAC_STRUCT(hal);
+	vos_msg_t vos_msg;
+	sir_spectral_config_params_t *spectral_config_params;
+
+	spectral_config_params = vos_mem_malloc(sizeof(*spectral_config_params));
+	if (!spectral_config_params) {
+		VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_ERROR,
+			  FL("Failed to alloc spectral config params"));
+		return eHAL_STATUS_FAILED_ALLOC;
+	}
+
+	*spectral_config_params = *params;
+
+	status = sme_AcquireGlobalLock(&mac_ctx->sme);
+	if (status == eHAL_STATUS_SUCCESS) {
+		/* Serialize the req through MC thread */
+		vos_msg.bodyptr = spectral_config_params;
+		vos_msg.type = SIR_HAL_SPECTRAL_SCAN_CONFIG_CMDID;
+		vos_status = vos_mq_post_message(VOS_MQ_ID_WDA, &vos_msg);
+
+		if (!VOS_IS_STATUS_SUCCESS(vos_status)) {
+			VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_ERROR,
+				  FL("post spectal scan config msg fail"));
+			status = eHAL_STATUS_FAILURE;
+			vos_mem_free(spectral_config_params);
+		}
+		sme_ReleaseGlobalLock(&mac_ctx->sme);
+	} else {
+		VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_ERROR,
+			  FL("sme_AcquireGlobalLock failed"));
+		vos_mem_free(spectral_config_params);
+	}
+
+	return status;
 }

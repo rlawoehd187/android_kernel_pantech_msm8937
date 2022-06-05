@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2018 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2019 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -287,6 +287,7 @@ enum eWniMsgTypes
     eWNI_SME_CHANGE_COUNTRY_CODE,
     eWNI_SME_GENERIC_CHANGE_COUNTRY_CODE,
     eWNI_SME_CC_CHANGE_IND,
+    eWNI_SME_UPDATE_PWR_IND,
     eWNI_SME_PRE_SWITCH_CHL_IND,
     eWNI_SME_POST_SWITCH_CHL_IND,
 
@@ -431,6 +432,9 @@ enum eWniMsgTypes
 
     /* Link layer statistics */
     eWMI_SME_LL_STATS_IND,
+    eWNI_SME_TRIGGER_SAE,
+    eWNI_SME_SEND_MGMT_FRAME_TX,
+    eWNI_SME_SEND_SAE_MSG,
 
     eWNI_SME_MSG_TYPES_END
 };

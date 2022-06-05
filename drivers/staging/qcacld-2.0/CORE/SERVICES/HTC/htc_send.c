@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2018 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2013-2019 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -159,13 +159,21 @@ static void SendPacketCompletion(HTC_TARGET *target, HTC_PACKET *pPacket)
     DoSendCompletion(pEndpoint,&container);
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 15, 0)
+void
+HTCSendCompleteCheckCleanup(struct timer_list *t)
+{
+	HTC_ENDPOINT *pEndpoint = from_timer(pEndpoint, t, ul_poll_timer);
+	HTCSendCompleteCheck(pEndpoint, 1);
+}
+#else
 void
 HTCSendCompleteCheckCleanup(void *context)
 {
     HTC_ENDPOINT *pEndpoint = (HTC_ENDPOINT *) context;
     HTCSendCompleteCheck(pEndpoint, 1);
 }
-
+#endif
 
 HTC_PACKET *AllocateHTCBundleTxPacket(HTC_TARGET *target)
 {
@@ -685,10 +693,12 @@ static A_STATUS HTCIssuePackets(HTC_TARGET       *target,
 	    target->CE_send_cnt--;
             pEndpoint->ul_outstanding_cnt--;
             HTC_PACKET_REMOVE(&pEndpoint->TxLookupQueue,pPacket);
-                /* reclaim credits */
-            pEndpoint->TxCredits += pPacket->PktInfo.AsTx.CreditsUsed;
-                /* put it back into the callers queue */
+            /* put it back into the callers queue */
             HTC_PACKET_ENQUEUE_TO_HEAD(pPktQueue,pPacket);
+            /* reclaim credits */
+            HTC_PACKET_QUEUE_ITERATE_ALLOW_REMOVE(pPktQueue, pPacket) {
+                pEndpoint->TxCredits += pPacket->PktInfo.AsTx.CreditsUsed;
+            } HTC_PACKET_QUEUE_ITERATE_END;
             UNLOCK_HTC_TX(target);
             break;
         }

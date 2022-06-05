@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2014, 2016-2018 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2011-2014, 2016-2020 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -80,15 +80,22 @@ limProcessDeauthFrame(tpAniSirGlobal pMac, tANI_U8 *pRxPacketInfo, tpPESession p
     tpPESession       pRoamSessionEntry=NULL;
     tANI_U8           roamSessionId;
 #ifdef WLAN_FEATURE_11W
-    tANI_U32          frameLen;
     bool need_ind_uplayer = true;
 #endif
+    tANI_U32          frameLen;
     int8_t frame_rssi;
 
     pHdr = WDA_GET_RX_MAC_HEADER(pRxPacketInfo);
 
     pBody = WDA_GET_RX_MPDU_DATA(pRxPacketInfo);
     frame_rssi = (int8_t)WDA_GET_RX_RSSI_NORMALIZED(pRxPacketInfo);
+
+    frameLen = WDA_GET_RX_PAYLOAD_LEN(pRxPacketInfo);
+    if (frameLen < sizeof(reasonCode)) {
+        PELOGE(limLog(pMac, LOGE,
+                      FL("Invalid framelen received %d"), frameLen);)
+        return;
+    }
 
     if (LIM_IS_STA_ROLE(psessionEntry) &&
         ((eLIM_SME_WT_DISASSOC_STATE == psessionEntry->limSmeState) ||
@@ -161,7 +168,6 @@ limProcessDeauthFrame(tpAniSirGlobal pMac, tANI_U8 *pRxPacketInfo, tpPESession p
             PELOGE(limLog(pMac, LOGE, FL("received an unprotected deauth from AP"));)
             // If the frame received is unprotected, forward it to the supplicant to initiate
             // an SA query
-            frameLen = WDA_GET_RX_PAYLOAD_LEN(pRxPacketInfo);
 
             //send the unprotected frame indication to SME
             limSendSmeUnprotectedMgmtFrameInd(pMac, pHdr->fc.subType,
@@ -488,20 +494,23 @@ limProcessDeauthFrame(tpAniSirGlobal pMac, tANI_U8 *pRxPacketInfo, tpPESession p
     }
 
     if ((pStaDs->mlmStaContext.mlmState == eLIM_MLM_WT_DEL_STA_RSP_STATE) ||
-        (pStaDs->mlmStaContext.mlmState == eLIM_MLM_WT_DEL_BSS_RSP_STATE)) {
+        (pStaDs->mlmStaContext.mlmState == eLIM_MLM_WT_DEL_BSS_RSP_STATE) ||
+        pStaDs->sta_deletion_in_progress) {
         /**
          * Already in the process of deleting context for the peer
          * and received Deauthentication frame. Log and Ignore.
          */
         PELOGE(limLog(pMac, LOGE,
-           FL("received Deauth frame from peer that is in state %X, addr "
+           FL("Deletion is in progress : %d for peer that is in state %X, addr "
            MAC_ADDRESS_STR", isDisassocDeauthInProgress : %d\n"),
-           pStaDs->mlmStaContext.mlmState,MAC_ADDR_ARRAY(pHdr->sa),
+           pStaDs->sta_deletion_in_progress,
+           pStaDs->mlmStaContext.mlmState, MAC_ADDR_ARRAY(pHdr->sa),
            pStaDs->isDisassocDeauthInProgress);)
         return;
     }
     pStaDs->mlmStaContext.disassocReason = (tSirMacReasonCodes)reasonCode;
     pStaDs->mlmStaContext.cleanupTrigger = eLIM_PEER_ENTITY_DEAUTH;
+    pStaDs->sta_deletion_in_progress = true;
 
     /// Issue Deauth Indication to SME.
     vos_mem_copy((tANI_U8 *) &mlmDeauthInd.peerMacAddr,

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2018 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2019 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -72,6 +72,7 @@
 #include <vos_threads.h>
 #include <vos_timer.h>
 #include <vos_pack_align.h>
+#include <linux/firmware.h>
 
 #define VOS_WDA_TIMEOUT 15000
 
@@ -361,6 +362,14 @@ v_VOID_t vos_fwDumpReq(tANI_U32 cmd, tANI_U32 arg1, tANI_U32 arg2,
 
 v_BOOL_t vos_is_packet_log_enabled(void);
 
+/**
+ * vos_is_fast_chswitch_cali_enabled()
+ *
+ * This function is used to check whether fast channel switch cali enabled
+ * Return: true if function enabled
+ */
+bool vos_is_fast_chswitch_cali_enabled(void);
+
 v_BOOL_t vos_config_is_no_ack(void);
 
 #ifdef WLAN_FEATURE_TSF_PLUS
@@ -404,6 +413,7 @@ v_U64_t vos_get_monotonic_boottime_ns(void);
 
 v_U64_t vos_get_bootbased_boottime_ns(void);
 
+bool vos_is_self_recovery_enabled(void);
 void vos_trigger_recovery(bool);
 
 #ifdef FEATURE_WLAN_D0WOW
@@ -440,6 +450,7 @@ void vos_pkt_stats_to_logger_thread(void *pl_hdr, void *pkt_dump, void *data);
 int vos_get_radio_index(void);
 int vos_set_radio_index(int radio_index);
 void vos_svc_fw_shutdown_ind(struct device *dev);
+void vos_svc_fw_crashed_ind(struct device *dev);
 uint64_t vos_do_div(uint64_t, uint32_t);
 /**
  * vos_do_div64() - Do uint64/64 divsion.
@@ -462,5 +473,18 @@ bool vos_is_mon_enable(void);
 v_BOOL_t vos_is_ch_switch_with_csa_enabled(void);
 #ifdef FEATURE_WLAN_DISABLE_CHANNEL_SWITCH
 bool vos_is_chan_ok_for_dnbs(uint8_t channel);
+#endif
+
+int qca_request_firmware(const struct firmware **firmware_p,
+                const char *name,
+                struct device *device);
+
+#ifdef WLAN_SMART_ANTENNA_FEATURE
+uint32_t vos_get_smart_ant_cfg(void);
+#else
+static inline uint32_t vos_get_smart_ant_cfg(void)
+{
+	return 0;
+}
 #endif
 #endif // if !defined __VOS_API_H
