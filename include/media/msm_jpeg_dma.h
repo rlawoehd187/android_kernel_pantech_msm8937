@@ -1,4 +1,4 @@
-/* Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -10,8 +10,9 @@
  * GNU General Public License for more details.
  */
 
-#ifndef __MSM_ISP47_H__
-#define __MSM_ISP47_H__
+#ifndef __MSM_JPEG_DMA__
+#define __MSM_JPEG_DMA__
 
-extern struct msm_vfe_hardware_info vfe47_hw_info;
-#endif /* __MSM_ISP47_H__ */
+#include <uapi/media/msm_jpeg_dma.h>
+
+#endif /* __MSM_JPEG_DMA__ */
